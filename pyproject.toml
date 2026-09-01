@@ -1,0 +1,103 @@
+[project]
+name = "suitability-receipts"
+version = "0.1.0"
+description = "Deterministic investment suitability determinations, or an explicit refusal."
+readme = "README.md"
+requires-python = "==3.12.*"
+license = { text = "Proprietary" }
+dependencies = [
+    "anthropic>=1.2.0,<2",
+    "pydantic>=2.13.5,<3",
+]
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.167.1",
+    "mutmut>=3.7.0",
+    "mypy>=2.3.1",
+    "pytest>=9.1.1",
+    "ruff>=0.16.5",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/suitability_receipts"]
+
+# ---------------------------------------------------------------------------
+# ruff
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    # Mutually exclusive with D211/D212, which we keep. Ruff requires choosing.
+    "D203",
+    "D213",
+    # Conflict with `ruff format`; the formatter owns these decisions.
+    "COM812",
+    "ISC001",
+    # Copyright headers are a licensing decision, not a code-quality one.
+    "CPY001",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = [
+    "S101",     # asserts are the point of a test
+    "PLR2004",  # literal comparisons are clearer than named constants in tests
+]
+
+[tool.ruff.lint.flake8-type-checking]
+# pydantic evaluates annotations at runtime; moving these imports into a
+# TYPE_CHECKING block would break model construction.
+runtime-evaluated-base-classes = ["pydantic.BaseModel"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+docstring-code-format = true
+
+# ---------------------------------------------------------------------------
+# mypy
+# ---------------------------------------------------------------------------
+# No [[tool.mypy.overrides]] section exists, and none may be added: there are
+# no per-module escape hatches in this project. Fix the types instead.
+[tool.mypy]
+python_version = "3.12"
+files = ["src", "tests"]
+plugins = ["pydantic.mypy"]
+strict = true
+warn_unreachable = true
+enable_error_code = [
+    "ignore-without-code",
+    "redundant-expr",
+    "truthy-bool",
+    "possibly-undefined",
+]
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+xfail_strict = true
+
+# ---------------------------------------------------------------------------
+# mutmut
+# ---------------------------------------------------------------------------
+[tool.mutmut]
+paths_to_mutate = ["src/suitability_receipts/"]
+tests_dir = "tests/"
