@@ -13,6 +13,14 @@ module will receive an already-constructed client by injection. Nothing in this 
 reads it today, and the determination rules never will — they do not call a model.
 """
 
+from suitability_receipts.engine import (
+    CONCENTRATION_LIMIT_FRACTION,
+    ENGINE_VERSION,
+    PROFILE_REVIEW_INTERVAL_DAYS,
+    RuleConfig,
+    RuleInput,
+    determine,
+)
 from suitability_receipts.models import (
     REQUIRED_KYC_FACTORS,
     RISK_LEVEL_RANK,
@@ -41,6 +49,9 @@ from suitability_receipts.models import (
 )
 
 __all__ = [
+    "CONCENTRATION_LIMIT_FRACTION",
+    "ENGINE_VERSION",
+    "PROFILE_REVIEW_INTERVAL_DAYS",
     "REQUIRED_KYC_FACTORS",
     "RISK_LEVEL_RANK",
     "ClientProfile",
@@ -62,7 +73,10 @@ __all__ = [
     "RefusalReason",
     "RiskLevel",
     "RuleCheck",
+    "RuleConfig",
+    "RuleInput",
     "SuitabilityOutcome",
     "TradeAction",
     "UpcomingExpense",
+    "determine",
 ]

@@ -69,7 +69,27 @@ These are the product. Each is a separately checked rule with its own tests.
 | `stale_profile` | The profile's last-reviewed date exceeds the configured review interval. |
 
 A single refusal may carry more than one reason. Reporting only the first one found would itself be
-a form of hedging.
+a form of hedging. Every rule runs on every determination; the engine does not short-circuit.
+
+A rule that cannot establish its basis refuses rather than passing without one. Where a profile is
+in tension with itself — a conservative risk tolerance against an aggressive stated objective, say —
+the engine takes the reading that does *not* produce a supported result. Those decisions are
+documented in the module docstring of `engine.py`, under "Tension between documented factors".
+
+### The two configured thresholds
+
+Two rules need a number that the domain does not supply. Both numbers are decisions made in this
+repository, not figures from a citable source, and both are named constants at the top of
+`src/suitability_receipts/engine.py` with their derivation written out:
+
+| Constant | Value | Status |
+| --- | --- | --- |
+| `CONCENTRATION_LIMIT_FRACTION` | 20% of the post-recommendation portfolio | Placeholder. Not an industry standard and not a regulatory figure. Chosen only so the rule has a definite boundary; to be calibrated against the eval set. |
+| `PROFILE_REVIEW_INTERVAL_DAYS` | 365 days | A repository choice encoding an annual cadence, in exact days so leap years do not shift it. No regulator is cited for it, here or in the code. |
+
+Both are overridable per determination through `RuleConfig`, so neither is baked into a rule. Read a
+`concentration_breach` refusal as "exceeded the configured limit", never as "exceeded a required
+limit".
 
 ---
 
@@ -112,14 +132,14 @@ Built so far:
 
 - The pydantic v2 domain models — `ClientProfile`, `Recommendation`, `Determination`, `Refusal` —
   with validation at the boundary.
+- **The determination engine.** All seven rules, each its own pure function over the models, with
+  the evaluation time injected: no clock reads, no environment reads, no model calls.
 - Toolchain, CI, and tests proving the toolchain works end to end.
 
 Not built yet:
 
-- **The determination engine.** The seven rules do not exist. Nothing evaluates suitability today.
 - **The LLM layer.** Nothing calls a model.
-
-The refusal taxonomy above describes the intended behaviour, not shipped behaviour.
+- **Property-based tests** over the engine.
 
 ---
 
@@ -129,8 +149,10 @@ The refusal taxonomy above describes the intended behaviour, not shipped behavio
 src/suitability_receipts/
   __init__.py       package exports
   models.py         the four domain models and their supporting types
+  engine.py         the seven rules and the `determine` entry point
 tests/
   test_models.py    model validation tests
+  test_engine.py    one section per rule, plus the entry point
 ```
 
 ## Handling of secrets
