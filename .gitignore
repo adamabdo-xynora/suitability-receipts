@@ -7,6 +7,9 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .hypothesis/
+# mutmut writes a mutated copy of the tree here, plus its result database.
+mutants/
+.mutmut-cache
 dist/
 build/
 *.egg-info/

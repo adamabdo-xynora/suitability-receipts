@@ -241,6 +241,16 @@ def test_profile_rejects_future_review_date() -> None:
         a_profile(last_reviewed=tomorrow)
 
 
+def test_profile_accepts_a_review_dated_today() -> None:
+    """Today is not the future: a profile reviewed this morning is documented, not stale.
+
+    The boundary matters in both directions. Rejecting today would refuse the freshest
+    profile there is, which is the opposite of what the check is for.
+    """
+    today = dt.datetime.now(tz=dt.UTC).date()
+    assert a_profile(last_reviewed=today).last_reviewed == today
+
+
 def test_profile_rejects_mixed_currency() -> None:
     """Every amount in a profile is in the profile's currency."""
     with pytest.raises(ValidationError, match="profile currency is CAD"):

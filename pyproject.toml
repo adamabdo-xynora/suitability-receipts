@@ -33,6 +33,8 @@ packages = ["src/suitability_receipts"]
 line-length = 100
 target-version = "py312"
 src = ["src", "tests"]
+# mutmut's generated copy of the tree. It is machine-written and thrown away.
+extend-exclude = ["mutants"]
 
 [tool.ruff.lint]
 select = ["ALL"]
@@ -94,10 +96,23 @@ warn_required_dynamic_aliases = true
 testpaths = ["tests"]
 addopts = "-ra --strict-markers --strict-config"
 xfail_strict = true
+# The package is imported from the source tree rather than through the installed
+# editable finder. mutmut runs the suite from a copy of the repository, and without
+# this every mutant would import the original, unmutated package and "survive".
+pythonpath = ["src"]
+markers = [
+    "strategy_coverage: asserts the generated space reaches a boundary (see test_engine_properties.py)",
+]
 
 # ---------------------------------------------------------------------------
 # mutmut
 # ---------------------------------------------------------------------------
 [tool.mutmut]
-paths_to_mutate = ["src/suitability_receipts/"]
-tests_dir = "tests/"
+source_paths = ["src/suitability_receipts/"]
+pytest_add_cli_args_test_selection = ["tests/"]
+# The strategy-coverage tests characterise the generated space, not the engine; running
+# them once per mutant costs minutes and kills nothing.
+pytest_add_cli_args = ["-m", "not strategy_coverage"]
+# Every mutant is retested on every run, rather than trusting a cached verdict against
+# the working tree's git state.
+use_git_change_detection = false
