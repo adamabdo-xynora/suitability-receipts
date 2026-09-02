@@ -108,6 +108,28 @@ uv run mypy --strict src tests
 No API key is needed for any of the above, and none will ever be needed to run the determination
 rules. The rules are pure functions over documented data.
 
+### Mutation testing
+
+`mutmut` over `src/` generates 573 mutants. The suite kills 542 and 31 survive — a score of 94.59%.
+
+The score is the less interesting half. All 31 survivors were inspected individually, and every one
+is an equivalent mutant rather than a test gap. They fall into two groups. Some are substitutions on
+defensive branches that no input can reach: `check_risk_mismatch` re-checks that risk tolerance is
+documented, but `check_missing_kyc_factor` has already refused by then, so that branch is
+unreachable through `determine` and a mutation of it changes nothing observable. The rest are
+changes with no observable effect at all — the contents of error messages, a sort key that is
+redundant because tuple ordering already produces the same order, and default-value substitutions
+where the alternative yields identical arithmetic.
+
+No survivor was killed by adding an assertion that merely restates the implementation. That is the
+only reason the accounting is worth writing down: a mutation score reported without it is a number
+standing in for an argument.
+
+One configuration requirement makes the run meaningful. `pytest` needs `pythonpath = ["src"]`,
+because mutmut runs the suite from a copied tree while the editable install resolves the package
+back to the original source. Without it, every mutant imports unmutated code and reports as
+surviving untouched — a score that is meaningless rather than merely bad.
+
 ---
 
 ## What obligation this models
