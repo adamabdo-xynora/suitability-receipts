@@ -5,9 +5,11 @@ Nothing here asserts that the engine agrees with the set. That is what
 disagreement between the two look like a broken test rather than a finding.
 
 What this file does assert is that the set is still the thing it claims to be: large
-enough, covering every refusal code, holding cases in both directions, and carrying the
-specific cases the concentration question needs. A case set silently losing its
-supported half is the failure that would make every other number here meaningless.
+enough, covering every refusal code, holding cases in both directions, carrying the
+specific cases the concentration question needs, and — since two of those cases were
+settled by keeping the refusal and splitting the finding — still requiring the two halves
+of that split to be told apart. A case set silently losing its supported half is the
+failure that would make every other number here meaningless.
 """
 
 from decimal import Decimal
@@ -17,7 +19,13 @@ import pytest
 from eval import CASES, CATEGORY_THRESHOLDS, Category, EvalCase
 from eval.cases import NOW
 from eval.scorer import Classification, classify, run, score
-from suitability_receipts import Determination, RefusalCode, determine
+from suitability_receipts import (
+    BREACH_ORIGIN_CODES,
+    BreachOrigin,
+    Determination,
+    RefusalCode,
+    determine,
+)
 from suitability_receipts.engine import DEFAULT_CONFIG
 from suitability_receipts.models import Refusal
 
@@ -76,6 +84,35 @@ def test_missing_factors_are_only_expected_of_missing_factor_refusals() -> None:
             assert RefusalCode.MISSING_KYC_FACTOR in case.expected_codes, case.name
 
 
+def test_an_origin_is_expected_of_exactly_the_cases_whose_codes_state_one() -> None:
+    """A case naming a portfolio-reading code must say whose breach it expects.
+
+    Both halves. A case expecting `concentration_breach` without naming an origin would
+    score an engine that reports a disposal and a purchase identically as correct, which
+    is the conflation this set exists to catch. A case naming an origin for a code that
+    cannot carry one is an expectation the engine can never meet or fail.
+    """
+    for case in CASES:
+        states_origin = bool(case.expected_codes & BREACH_ORIGIN_CODES)
+        assert (case.expected_origins is not None) is states_origin, case.name
+
+
+def test_the_set_pins_both_sides_of_the_created_inherited_distinction() -> None:
+    """`created` and `reduced` are each expected somewhere, or the finding is untested.
+
+    `increased` is not required here. The eval set is capped at 35 cases and every case
+    in it earns its place by standing for a situation an advisor is in; the fourth origin
+    is covered exhaustively in `tests/test_engine.py` instead, where adding a case costs
+    nothing that has to be traded against another.
+    """
+    expected = {
+        origin for case in CASES if case.expected_origins for origin in case.expected_origins
+    }
+    assert BreachOrigin.CREATED in expected
+    assert BreachOrigin.REDUCED in expected
+    assert BreachOrigin.UNCHANGED in expected
+
+
 def test_several_cases_trip_more_than_one_code() -> None:
     """Refusals carry every reason; a set of single-code cases would never check that."""
     assert sum(len(case.expected_codes) > 1 for case in CASES) >= 2
@@ -103,6 +140,22 @@ def test_the_concentration_question_is_actually_asked() -> None:
     assert "a sell that reduces an over-concentration without curing it" in names
     assert "a sell that cures an over-concentration" in names
     assert "a buy that creates an over-concentration" in names
+
+
+def test_the_question_the_concentration_cases_answered_stays_answered() -> None:
+    """The reducing sell and the buy that creates share a code and must not share a finding.
+
+    Named by hand rather than derived, because the value of these two is entirely in
+    their being a pair: either alone is satisfied by an engine that labels every breach
+    the same way.
+    """
+    by_name = {case.name: case for case in CASES}
+    reduced = by_name["a sell that reduces an over-concentration without curing it"]
+    created = by_name["a buy that creates an over-concentration"]
+    assert reduced.expected_outcome == created.expected_outcome == "refused"
+    assert reduced.expected_codes == created.expected_codes
+    assert reduced.expected_origins == frozenset({BreachOrigin.REDUCED})
+    assert created.expected_origins == frozenset({BreachOrigin.CREATED})
 
 
 def test_the_boundary_cases_sit_on_the_configured_constants() -> None:

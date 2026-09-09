@@ -4,13 +4,18 @@ These models define the *shape* of the problem and validate data at the boundary
 They contain no determination logic: nothing here decides whether a recommendation
 is suitable. That is the job of the (not yet written) deterministic rule engine.
 
-Two invariants are enforced here rather than left to the engine's good intentions,
-because a determination that skipped a check must be impossible to represent at all:
+Three invariants are enforced here rather than left to the engine's good intentions,
+because a determination that skipped a check — or that reported a finding without saying
+what it is a finding about — must be impossible to represent at all:
 
 1. A `Determination` must record a passing `RuleCheck` for every member of
    `RefusalCode`. A supported result is proof that all seven rules ran.
 2. Every `RuleCheck` must cite at least one documented profile factor as its basis.
    No rule passes for an unstated reason.
+3. A `RefusalReason` whose rule reads the documented portfolio must state a
+   `BreachOrigin`. Those two rules can object to exposure the client already held, and a
+   refusal that could not say whether the recommendation created that exposure or
+   inherited and reduced it would report two different situations identically.
 
 Each `FactorCitation` carries the profile field, the value as documented, and the
 date it was documented, so that a verifier holding the profile can recompute the
@@ -35,8 +40,11 @@ from pydantic import (
 )
 
 __all__ = [
+    "BREACH_ORIGIN_CODES",
+    "BREACH_ORIGIN_SEVERITY",
     "REQUIRED_KYC_FACTORS",
     "RISK_LEVEL_RANK",
+    "BreachOrigin",
     "ClientProfile",
     "Currency",
     "Determination",
@@ -220,6 +228,67 @@ class RefusalCode(StrEnum):
     CONCENTRATION_BREACH = "concentration_breach"
     UNSUPPORTED_RATIONALE = "unsupported_rationale"
     STALE_PROFILE = "stale_profile"
+
+
+class BreachOrigin(StrEnum):
+    """What a recommendation does to the exposure a rule objects to.
+
+    Two rules read the documented portfolio, and so can object to something that was
+    already in it. Without this, their refusals conflate two different situations: a
+    recommendation that brings the objectionable exposure into being, and one that
+    inherits it from the client's history and reduces it. Both still refuse. A receipt
+    that could not tell them apart reports the advisor's proposal and the client's file
+    as the same finding, and an advisor de-risking a position in stages gets the same
+    answer at every stage but the last.
+
+    `CREATED` is the only member that holds the recommendation responsible for the
+    objection. The other three all say the objection predates it, and differ in what the
+    recommendation does about it. `UNCHANGED` also covers having no exposure to move at
+    all — a sell of an instrument the profile does not document holding — because such a
+    recommendation likewise neither creates nor reduces one.
+
+    This is not a softer outcome and does not license one. A `REDUCED` breach is still a
+    breach, the refusal still fires with the same force, and the residual is still stated
+    in `RefusalReason.detail`. What the field adds is that the receipt says which of the
+    two situations it is, rather than leaving them indistinguishable.
+    """
+
+    CREATED = "created"
+    INCREASED = "increased"
+    UNCHANGED = "unchanged"
+    REDUCED = "reduced"
+
+
+BREACH_ORIGIN_SEVERITY: MappingProxyType[BreachOrigin, int] = MappingProxyType(
+    {
+        BreachOrigin.REDUCED: 0,
+        BreachOrigin.UNCHANGED: 1,
+        BreachOrigin.INCREASED: 2,
+        BreachOrigin.CREATED: 3,
+    },
+)
+"""Ordering of `BreachOrigin`, stated explicitly rather than left to declaration order.
+
+One reason can cover several breaches at once — an instrument, its issuer and its sector,
+or unrelated buckets that breach for unrelated causes. Such a reason reports the most
+severe origin among them, so that a recommendation reducing one breach while creating
+another cannot read as a reduction."""
+
+
+BREACH_ORIGIN_CODES: frozenset[RefusalCode] = frozenset(
+    {
+        RefusalCode.RISK_MISMATCH,
+        RefusalCode.CONCENTRATION_BREACH,
+    },
+)
+"""The codes whose refusal must state a `BreachOrigin`, and the only ones that may.
+
+These are the two rules that read the documented portfolio, so they are the two whose
+objection can predate the recommendation. The others cannot: `missing_kyc_factor`,
+`unsupported_rationale` and `stale_profile` are findings about the file rather than about
+exposure; `horizon_mismatch` is a finding about the product's terms; and
+`liquidity_conflict` already counts a disposal as consuming nothing, so it never objects
+to a recommendation that reduces what it measures."""
 
 
 # ---------------------------------------------------------------------------
@@ -485,6 +554,12 @@ class RefusalReason(_Record):
     Exactly one evidence field is populated, determined by `code`: a missing-factor
     refusal names missing factors, an unsupported-rationale refusal names the claims
     the profile does not support, and the rest name the documented facts that conflict.
+
+    `breach_origin` is present on exactly the codes in `BREACH_ORIGIN_CODES` and absent
+    on every other, both enforced here. A rule that reads the documented portfolio cannot
+    report a breach without saying whether this recommendation created it or inherited it
+    — the two are different findings, and the model makes the undifferentiated one
+    unrepresentable rather than leaving it to the engine's good intentions.
     """
 
     code: RefusalCode
@@ -492,12 +567,21 @@ class RefusalReason(_Record):
     missing_factors: tuple[FactorKey, ...] = ()
     conflicting_factors: tuple[FactorCitation, ...] = ()
     unsupported_claims: tuple[FactorCitation, ...] = ()
+    breach_origin: BreachOrigin | None = None
 
     @model_validator(mode="after")
     def _check_evidence(self) -> Self:
         _require_unique(self.missing_factors, "missing factor")
         _require_unique(self.conflicting_factors, "conflicting factor")
         _require_unique(self.unsupported_claims, "unsupported claim")
+
+        states_origin = self.code in BREACH_ORIGIN_CODES
+        if states_origin and self.breach_origin is None:
+            msg = f"{self.code} requires a breach_origin"
+            raise ValueError(msg)
+        if not states_origin and self.breach_origin is not None:
+            msg = f"{self.code} must not carry a breach_origin"
+            raise ValueError(msg)
 
         evidence: dict[str, tuple[object, ...]] = {
             "missing_factors": self.missing_factors,

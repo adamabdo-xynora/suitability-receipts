@@ -26,8 +26,11 @@ from suitability_receipts.engine import (
     determine,
 )
 from suitability_receipts.models import (
+    BREACH_ORIGIN_CODES,
+    BREACH_ORIGIN_SEVERITY,
     REQUIRED_KYC_FACTORS,
     RISK_LEVEL_RANK,
+    BreachOrigin,
     ClientProfile,
     Currency,
     Determination,
@@ -53,11 +56,14 @@ from suitability_receipts.models import (
 )
 
 __all__ = [
+    "BREACH_ORIGIN_CODES",
+    "BREACH_ORIGIN_SEVERITY",
     "CONCENTRATION_LIMIT_FRACTION",
     "ENGINE_VERSION",
     "PROFILE_REVIEW_INTERVAL_DAYS",
     "REQUIRED_KYC_FACTORS",
     "RISK_LEVEL_RANK",
+    "BreachOrigin",
     "ClientProfile",
     "Currency",
     "Determination",

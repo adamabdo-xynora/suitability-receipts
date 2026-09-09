@@ -41,6 +41,11 @@ that does *not* produce a supported result. Silently resolving a tension toward
 * A `switch` does not say what is being switched out of. It is therefore counted as
   consuming liquidity and as adding concentration, gross, with no netting for the
   disposal it implies.
+* A profile that documents no portfolio cannot establish that a recommendation reduces
+  an existing exposure, so `check_risk_mismatch` records the origin it can defend rather
+  than the one that reads best: a purchase creates the exposure, and a disposal it cannot
+  see leaves it unchanged. `check_concentration_breach` does not face the question, since
+  it refuses outright when the portfolio is undocumented.
 * `ClientProfile.holdings` defaults to `()`, so an empty tuple cannot be distinguished
   from "the portfolio was never documented". `check_concentration_breach` reads it as
   undocumented and refuses, rather than as an empty portfolio that any purchase would
@@ -48,6 +53,33 @@ that does *not* produce a supported result. Silently resolving a tension toward
 * A rationale claim that nearly matches the profile is unsupported. The engine does not
   round a claim toward the documented value, and does not treat a claim dated to a
   different documentation event as verified.
+* A reason covering several breaches at once reports the most severe `BreachOrigin`
+  among them, so that reducing one breach while creating another does not read as a
+  reduction.
+
+Breaches the recommendation did not create
+------------------------------------------
+`risk_mismatch` and `concentration_breach` are the two rules that read the documented
+portfolio, so they are the two that can object to exposure the client already held. Both
+used to ignore the recommendation's action entirely, which meant a `sell` that strictly
+reduced the exposure being objected to was refused in the same terms as a `buy` that
+created it. The outcome was right and the receipt was not: it reported the client's
+history and the advisor's proposal as one finding, and an advisor de-risking a position
+in stages got the same answer at every stage but the last.
+
+Both rules still refuse. What changed is that each now states a `BreachOrigin` on its
+reason, and each says in `detail` what the exposure was before the recommendation and
+what it would be after. Nothing passes that did not pass before: a reduced breach is
+still a breach and the residual is still on the receipt. The two rules share the enum,
+the field, and the principle, and differ in what "the exposure being objected to" means —
+for concentration it is a bucket over the configured limit, for risk it is any holding of
+a product rated above the effective ceiling — so each classifies its own before-and-after
+and they do not share a classifier. See `_concentration_origin` and `_risk_origin`.
+
+A limit worth stating plainly: selling a position *entirely* still refuses under
+`risk_mismatch`, with origin `reduced`. That rule objects to the product's rating, which
+no disposal changes. Whether the objection should lift once the exposure reaches zero is
+a separate question from this one, and it is not answered here.
 
 Preconditions
 -------------
@@ -60,7 +92,7 @@ documented review date.
 
 import datetime as dt
 import hashlib
-from collections.abc import Callable, Hashable, Iterable
+from collections.abc import Callable, Hashable, Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from types import MappingProxyType
@@ -68,8 +100,10 @@ from types import MappingProxyType
 from pydantic import BaseModel
 
 from suitability_receipts.models import (
+    BREACH_ORIGIN_SEVERITY,
     REQUIRED_KYC_FACTORS,
     RISK_LEVEL_RANK,
+    BreachOrigin,
     ClientProfile,
     Determination,
     FactorCitation,
@@ -99,6 +133,7 @@ __all__ = [
     "RuleConfig",
     "RuleInput",
     "RuleOutcome",
+    "breach_origin_of",
     "check_concentration_breach",
     "check_horizon_mismatch",
     "check_liquidity_conflict",
@@ -412,6 +447,171 @@ def _missing_factors(code: RefusalCode, keys: tuple[FactorKey, ...]) -> RefusalR
 
 
 # ---------------------------------------------------------------------------
+# Exposure, and whose breach it is
+#
+# Shared by the two rules that read the documented portfolio, and therefore by the two
+# that can object to something the client already held.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _Exposures:
+    """Bucket exposure and portfolio total, on both sides of the recommendation.
+
+    Both sides are kept because a rule that objects to an exposure has to be able to say
+    whether the recommendation is responsible for it. Computing only the "after" side is
+    what made a disposal indistinguishable from a purchase.
+    """
+
+    before: Mapping[tuple[str, str], Decimal]
+    before_total: Decimal
+    after: Mapping[tuple[str, str], Decimal]
+    after_total: Decimal
+
+    def amounts(self, bucket: tuple[str, str]) -> tuple[Decimal, Decimal]:
+        """Return the exposure in `bucket` before and after the recommendation."""
+        return self.before.get(bucket, _ZERO), self.after.get(bucket, _ZERO)
+
+
+def _portfolio_exposure(profile: ClientProfile) -> tuple[dict[tuple[str, str], Decimal], Decimal]:
+    """Return documented exposure per (dimension, value), and the portfolio total."""
+    exposure: dict[tuple[str, str], Decimal] = {}
+    for holding in profile.holdings:
+        value = holding.market_value.amount
+        exposure[("instrument", holding.instrument_id)] = (
+            exposure.get(("instrument", holding.instrument_id), _ZERO) + value
+        )
+        exposure[("issuer", holding.issuer)] = (
+            exposure.get(("issuer", holding.issuer), _ZERO) + value
+        )
+        if holding.sector is not None:
+            exposure[("sector", holding.sector)] = (
+                exposure.get(("sector", holding.sector), _ZERO) + value
+            )
+    total = sum((holding.market_value.amount for holding in profile.holdings), _ZERO)
+    return exposure, total
+
+
+def _exposures(rule_input: RuleInput) -> _Exposures:
+    """Return exposure per (dimension, value) before and after the recommendation.
+
+    A buy or a switch adds the full amount to the product's instrument, issuer, and
+    sector buckets, gross. A sell removes what is actually held of that instrument, and
+    no more. A hold changes nothing.
+    """
+    product = rule_input.recommendation.product
+    amount = rule_input.recommendation.amount.amount
+    before, before_total = _portfolio_exposure(rule_input.profile)
+
+    action = rule_input.recommendation.action
+    if action in {TradeAction.BUY, TradeAction.SWITCH}:
+        delta = amount
+    elif action is TradeAction.SELL:
+        held = before.get(("instrument", product.instrument_id), _ZERO)
+        delta = -min(amount, held)
+    else:
+        delta = _ZERO
+
+    after = dict(before)
+    if delta != _ZERO:
+        buckets = [("instrument", product.instrument_id), ("issuer", product.issuer)]
+        if product.sector is not None:
+            buckets.append(("sector", product.sector))
+        for bucket in buckets:
+            after[bucket] = after.get(bucket, _ZERO) + delta
+
+    return _Exposures(
+        before=before,
+        before_total=before_total,
+        after=after,
+        after_total=before_total + delta,
+    )
+
+
+def _percent(part: Decimal, whole: Decimal) -> str:
+    """Render `part` as a percentage of `whole`, to two decimal places."""
+    return f"{(part / whole * _HUNDRED).quantize(_PERCENT_QUANTUM)}%"
+
+
+# ---------------------------------------------------------------------------
+# Whose breach it is
+#
+# One enum, one field, one principle, and two classifiers — because the two rules that
+# can inherit a breach do not agree on what "the exposure being objected to" is. For
+# `concentration_breach` it is a bucket over the configured limit, so the created case
+# is "this bucket was inside the limit before". For `risk_mismatch` there is no limit to
+# be over: the objection is to holding a product rated above the ceiling at all, so the
+# created case is "the profile documents no position at all". Forcing one function to
+# serve both would mean pretending those are the same question.
+# ---------------------------------------------------------------------------
+
+
+def breach_origin_of(origins: Iterable[BreachOrigin]) -> BreachOrigin:
+    """Return the most severe of `origins`, ordered by `BREACH_ORIGIN_SEVERITY`.
+
+    One reason can cover several breaches at once. Reporting the mildest of them, or
+    whichever came first, would let a recommendation that creates one breach while
+    reducing another read as a reduction.
+
+    Raises:
+        ValueError: If `origins` is empty. There is no neutral origin to fall back to,
+            and inventing one would be the understatement this exists to prevent.
+    """
+    ordered = sorted(origins, key=lambda origin: BREACH_ORIGIN_SEVERITY[origin])
+    if not ordered:
+        msg = "no breach origins to summarise"
+        raise ValueError(msg)
+    return ordered[-1]
+
+
+def _concentration_origin(
+    before: Decimal,
+    after: Decimal,
+    *,
+    breached_before: bool,
+) -> BreachOrigin:
+    """Classify a breaching bucket by what the recommendation did to it.
+
+    `breached_before` carries the whole created-versus-inherited distinction: a bucket
+    inside the limit before and outside it now was put there by this recommendation,
+    whether by adding to the bucket or by shrinking the portfolio it is measured against.
+
+    Direction is then read from the *amount*, never from the fraction. A purchase of
+    something else lowers an over-concentrated position's share by enlarging the
+    denominator, and diluting an exposure is not disposing of one — the client's holding
+    of the concentrated name is the same size it was.
+    """
+    if not breached_before:
+        return BreachOrigin.CREATED
+    if after > before:
+        return BreachOrigin.INCREASED
+    if after < before:
+        return BreachOrigin.REDUCED
+    return BreachOrigin.UNCHANGED
+
+
+def _risk_origin(before: Decimal, after: Decimal) -> BreachOrigin:
+    """Classify a risk objection by what the recommendation does to the position.
+
+    This rule objects to holding a product rated above the effective ceiling, so the
+    exposure it measures is the position in that instrument and there is no limit for it
+    to be over: any position at all is the thing objected to. `CREATED` therefore means
+    the profile documents no position and the recommendation would open one — which is
+    also how an undocumented portfolio reads, deliberately, because a profile that
+    documents no holdings cannot establish that a position already existed.
+
+    Zero before and zero after is a breach nobody created: a sell or a hold of an
+    instrument the profile does not document holding moves no exposure, and the refusal
+    stands on the product's rating alone.
+    """
+    if after > before:
+        return BreachOrigin.CREATED if before <= _ZERO else BreachOrigin.INCREASED
+    if after < before:
+        return BreachOrigin.REDUCED
+    return BreachOrigin.UNCHANGED
+
+
+# ---------------------------------------------------------------------------
 # The seven rules
 # ---------------------------------------------------------------------------
 
@@ -433,12 +633,64 @@ def check_missing_kyc_factor(rule_input: RuleInput) -> RuleOutcome:
     )
 
 
+def _risk_origin_detail(
+    rule_input: RuleInput,
+    origin: BreachOrigin,
+    before: Decimal,
+    after: Decimal,
+) -> str:
+    """Say what the recommendation does to the client's position in the rated product.
+
+    The sentence that keeps a `reduced` refusal from reading like a `created` one. It
+    states both sides of the position in figures rather than characterising the trade,
+    so that a reader can check it against `profile.holdings` instead of taking it.
+    """
+    profile = rule_input.profile
+    currency = profile.currency.value
+    instrument = rule_input.recommendation.product.instrument_id
+    action = rule_input.recommendation.action.value
+    if not profile.holdings:
+        held = (
+            f"The profile documents no portfolio, so no existing position in {instrument} "
+            f"can be established"
+        )
+    elif before <= _ZERO:
+        held = f"The profile documents no position in {instrument}"
+    else:
+        held = f"The profile documents {before} {currency} in {instrument}"
+    if origin is BreachOrigin.CREATED:
+        return f"{held}; this {action} would open one of {after} {currency}."
+    if origin is BreachOrigin.INCREASED:
+        return f"{held}; this {action} would raise it to {after} {currency}."
+    if origin is BreachOrigin.REDUCED:
+        return (
+            f"{held}; this {action} would reduce it to {after} {currency}. The refusal "
+            f"is about the product's rating, which a disposal does not change."
+        )
+    if before <= _ZERO:
+        return f"{held}, and this {action} would not open one."
+    return f"{held}, which this {action} does not change."
+
+
 def check_risk_mismatch(rule_input: RuleInput) -> RuleOutcome:
     """Refuse when the product's risk rating exceeds what the profile supports.
 
     The ceiling is the most conservative of the documented risk tolerance and the
     ceiling implied by each documented objective. A profile in tension with itself does
     not license the riskier reading of itself.
+
+    The refusal states a `BreachOrigin`: a purchase of a product rated above the ceiling
+    creates the exposure, a disposal of one already held reduces it, and the two are not
+    the same finding even though both refuse. Reducing a position does not lift the
+    objection — the rating is a fact about the product, not about the size of the
+    position — so a `reduced` refusal is a refusal in full. What it is not is a claim
+    that the advisor proposed the unsuitable exposure.
+
+    Holdings are read only to classify the origin, never to decide the outcome, so the
+    rule does not require them: a client whose portfolio is undocumented still gets told
+    that the product is too risky, rather than being told only that their portfolio is
+    undocumented. `HOLDINGS` is cited on the refusal exactly when the profile documents
+    it, because that is when the rule actually consulted it.
     """
     profile = rule_input.profile
     missing = _undocumented(profile, FactorKey.RISK_TOLERANCE, FactorKey.INVESTMENT_OBJECTIVES)
@@ -457,15 +709,19 @@ def check_risk_mismatch(rule_input: RuleInput) -> RuleOutcome:
     ceiling = min(ranks)
     product = rule_input.recommendation.product
     if RISK_LEVEL_RANK[product.risk_rating] > ceiling:
+        before, after = _exposures(rule_input).amounts(("instrument", product.instrument_id))
+        origin = _risk_origin(before, after)
         return RefusalReason(
             code=RefusalCode.RISK_MISMATCH,
             detail=(
                 f"Product risk rating {product.risk_rating.value} "
                 f"(source: {product.risk_rating_source}) exceeds what the profile supports: "
                 f"documented risk tolerance {tolerance.value}, "
-                f"objectives {_documented_value(profile, FactorKey.INVESTMENT_OBJECTIVES)}."
+                f"objectives {_documented_value(profile, FactorKey.INVESTMENT_OBJECTIVES)}. "
+                f"{_risk_origin_detail(rule_input, origin, before, after)}"
             ),
-            conflicting_factors=basis,
+            conflicting_factors=(*basis, *_basis(profile, FactorKey.HOLDINGS)),
+            breach_origin=origin,
         )
     return RuleCheck(code=RefusalCode.RISK_MISMATCH, basis=basis)
 
@@ -572,54 +828,41 @@ def check_liquidity_conflict(rule_input: RuleInput) -> RuleOutcome:
     return RuleCheck(code=RefusalCode.LIQUIDITY_CONFLICT, basis=basis)
 
 
-def _exposures(rule_input: RuleInput) -> tuple[dict[tuple[str, str], Decimal], Decimal]:
-    """Return post-recommendation exposure per (dimension, value), and the portfolio total.
+_CONCENTRATION_ORIGIN_PHRASE: MappingProxyType[BreachOrigin, str] = MappingProxyType(
+    {
+        BreachOrigin.CREATED: "created by this recommendation",
+        BreachOrigin.INCREASED: "already over the limit, and increased by this recommendation",
+        BreachOrigin.UNCHANGED: "already over the limit, and not reduced by this recommendation",
+        BreachOrigin.REDUCED: (
+            "already over the limit, and reduced by this recommendation without curing it"
+        ),
+    },
+)
+"""How each origin is described against a single breaching bucket."""
 
-    A buy or a switch adds the full amount to the product's instrument, issuer, and
-    sector buckets, gross. A sell removes what is actually held of that instrument, and
-    no more. A hold changes nothing.
+_CONCENTRATION_ORIGIN_SUMMARY: MappingProxyType[BreachOrigin, str] = MappingProxyType(
+    {
+        BreachOrigin.CREATED: "This recommendation creates a breach that did not exist before it.",
+        BreachOrigin.INCREASED: "The breach predates this recommendation, which increases it.",
+        BreachOrigin.UNCHANGED: (
+            "The breach predates this recommendation, which does not reduce it."
+        ),
+        BreachOrigin.REDUCED: (
+            "The breach predates this recommendation, which reduces it without bringing it "
+            "inside the limit."
+        ),
+    },
+)
+"""How the reason's overall origin is stated, once, at the end of the detail."""
+
+
+def _breach_share(amount: Decimal, total: Decimal, currency: str) -> str:
+    """Render a bucket's exposure as a share of the portfolio, or as an amount.
+
+    A portfolio with nothing in it has no share to express, and dividing by it would
+    raise rather than report. The amount is the honest fallback.
     """
-    profile = rule_input.profile
-    product = rule_input.recommendation.product
-    amount = rule_input.recommendation.amount.amount
-
-    exposure: dict[tuple[str, str], Decimal] = {}
-    for holding in profile.holdings:
-        value = holding.market_value.amount
-        exposure[("instrument", holding.instrument_id)] = (
-            exposure.get(("instrument", holding.instrument_id), _ZERO) + value
-        )
-        exposure[("issuer", holding.issuer)] = (
-            exposure.get(("issuer", holding.issuer), _ZERO) + value
-        )
-        if holding.sector is not None:
-            exposure[("sector", holding.sector)] = (
-                exposure.get(("sector", holding.sector), _ZERO) + value
-            )
-
-    action = rule_input.recommendation.action
-    if action in {TradeAction.BUY, TradeAction.SWITCH}:
-        delta = amount
-    elif action is TradeAction.SELL:
-        held = exposure.get(("instrument", product.instrument_id), _ZERO)
-        delta = -min(amount, held)
-    else:
-        delta = _ZERO
-
-    if delta != _ZERO:
-        buckets = [("instrument", product.instrument_id), ("issuer", product.issuer)]
-        if product.sector is not None:
-            buckets.append(("sector", product.sector))
-        for bucket in buckets:
-            exposure[bucket] = exposure.get(bucket, _ZERO) + delta
-
-    total = sum((holding.market_value.amount for holding in profile.holdings), _ZERO) + delta
-    return exposure, total
-
-
-def _percent(part: Decimal, whole: Decimal) -> str:
-    """Render `part` as a percentage of `whole`, to two decimal places."""
-    return f"{(part / whole * _HUNDRED).quantize(_PERCENT_QUANTUM)}%"
+    return _percent(amount, total) if total > _ZERO else f"{amount} {currency}"
 
 
 def check_concentration_breach(rule_input: RuleInput) -> RuleOutcome:
@@ -632,13 +875,29 @@ def check_concentration_breach(rule_input: RuleInput) -> RuleOutcome:
     over-concentrated portfolio without curing it is still refused. The engine reports
     that the portfolio breaches the limit; it does not decide that an improvement is
     good enough.
+
+    What it now also reports is which of those situations it is. Each breaching bucket is
+    compared against the same bucket in the documented portfolio, and the reason carries
+    the most severe `BreachOrigin` among them. The distinction is drawn on the exposure
+    *amount*, not on its share: a purchase of something else lowers an over-concentrated
+    position's percentage by enlarging the portfolio, and that is dilution rather than
+    remediation — the client's holding of the concentrated name has not moved.
+
+    A consequence of checking every bucket rather than only the ones touched: a disposal
+    can *create* a breach in a bucket it never touches. Selling one position shrinks the
+    portfolio every other bucket is measured against, so a holding sitting exactly at the
+    limit can be over it afterwards without having moved a cent. `created` is the right
+    word for that — the recommendation is what put the bucket over the line — and it is
+    why the aggregate is the most severe origin rather than the one belonging to the
+    instrument being traded.
     """
     profile = rule_input.profile
     if not profile.holdings:
         return _missing_factors(RefusalCode.CONCENTRATION_BREACH, (FactorKey.HOLDINGS,))
 
     basis = _basis(profile, FactorKey.HOLDINGS)
-    exposure, total = _exposures(rule_input)
+    exposures = _exposures(rule_input)
+    total = exposures.after_total
     if total <= _ZERO:
         return RuleCheck(code=RefusalCode.CONCENTRATION_BREACH, basis=basis)
 
@@ -647,23 +906,38 @@ def check_concentration_breach(rule_input: RuleInput) -> RuleOutcome:
     breaches = sorted(
         (
             (dimensions.index(dimension), value, amount)
-            for (dimension, value), amount in exposure.items()
+            for (dimension, value), amount in exposures.after.items()
             if amount > total * limit
         ),
         key=lambda breach: (breach[0], breach[1]),
     )
     if breaches:
-        described = "; ".join(
-            f"{dimensions[index]} {value} at {_percent(amount, total)}"
-            for index, value, amount in breaches
-        )
+        currency = profile.currency.value
+        origins: list[BreachOrigin] = []
+        described: list[str] = []
+        for index, value, amount in breaches:
+            before, _ = exposures.amounts((dimensions[index], value))
+            origin = _concentration_origin(
+                before,
+                amount,
+                breached_before=before > exposures.before_total * limit,
+            )
+            origins.append(origin)
+            described.append(
+                f"{dimensions[index]} {value} at {_percent(amount, total)} "
+                f"(was {_breach_share(before, exposures.before_total, currency)}, "
+                f"{_CONCENTRATION_ORIGIN_PHRASE[origin]})"
+            )
+        overall = breach_origin_of(origins)
         return RefusalReason(
             code=RefusalCode.CONCENTRATION_BREACH,
             detail=(
                 f"Post-recommendation exposure exceeds the configured limit of "
-                f"{_percent(limit, Decimal(1))}: {described}."
+                f"{_percent(limit, Decimal(1))}: {'; '.join(described)}. "
+                f"{_CONCENTRATION_ORIGIN_SUMMARY[overall]}"
             ),
             conflicting_factors=basis,
+            breach_origin=overall,
         )
     return RuleCheck(code=RefusalCode.CONCENTRATION_BREACH, basis=basis)
 
@@ -814,6 +1088,10 @@ def _merge_reasons(reasons: Iterable[RefusalReason]) -> tuple[RefusalReason, ...
     Several rules can independently report the same missing factor, and a `Refusal` may
     carry each code only once. Merging keeps every piece of evidence rather than
     discarding whichever reason came second.
+
+    A merged reason takes the most severe `BreachOrigin` of the group, for the same
+    reason a single reason covering several buckets does: the merge must not be a way for
+    a created breach to be reported as a reduced one.
     """
     grouped: dict[RefusalCode, list[RefusalReason]] = {}
     for reason in reasons:
@@ -824,6 +1102,7 @@ def _merge_reasons(reasons: Iterable[RefusalReason]) -> tuple[RefusalReason, ...
         if len(group) == 1:
             merged.append(group[0])
             continue
+        origins = [reason.breach_origin for reason in group if reason.breach_origin is not None]
         merged.append(
             RefusalReason(
                 code=code,
@@ -835,6 +1114,7 @@ def _merge_reasons(reasons: Iterable[RefusalReason]) -> tuple[RefusalReason, ...
                 unsupported_claims=_unique(
                     citation for reason in group for citation in reason.unsupported_claims
                 ),
+                breach_origin=breach_origin_of(origins) if origins else None,
             ),
         )
     return tuple(merged)

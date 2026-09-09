@@ -41,6 +41,8 @@ from hypothesis import event, example, find, given, settings
 from hypothesis import strategies as st
 
 from suitability_receipts import (
+    BREACH_ORIGIN_CODES,
+    BreachOrigin,
     ClientProfile,
     Currency,
     Determination,
@@ -739,8 +741,10 @@ def test_a_product_above_the_effective_ceiling_is_always_refused(case: Case) -> 
     Tightening: "a product above the ceiling is refused" alone passes on an engine that
     refuses everything, and on one whose ceiling is always `LOW`. So the property is an
     equivalence — at or below the ceiling, `risk_mismatch` must be absent — and it
-    checks that the refusal carries the two factors it weighed, so an engine cannot
-    satisfy it by refusing with empty evidence.
+    checks that the refusal carries the factors it weighed, so an engine cannot satisfy
+    it by refusing with empty evidence. Since the refusal states what it does to the
+    client's position in the product, the portfolio is among those factors — but only
+    when the profile documents one, because a rule may not cite a fact it could not read.
     """
     ceiling = effective_ceiling(case.profile)
     outcome = decide(case)
@@ -754,9 +758,11 @@ def test_a_product_above_the_effective_ceiling_is_always_refused(case: Case) -> 
     if exceeds:
         assert isinstance(outcome, Refusal)
         reason = next(r for r in outcome.reasons if r.code == RefusalCode.RISK_MISMATCH)
+        weighed = (FactorKey.RISK_TOLERANCE, FactorKey.INVESTMENT_OBJECTIVES)
+        portfolio = (FactorKey.HOLDINGS,) if case.profile.holdings else ()
         assert tuple(citation.key for citation in reason.conflicting_factors) == (
-            FactorKey.RISK_TOLERANCE,
-            FactorKey.INVESTMENT_OBJECTIVES,
+            *weighed,
+            *portfolio,
         )
 
 
@@ -928,14 +934,14 @@ def test_growing_a_position_never_lowers_its_exposure(case: Case, data: st.DataO
         },
     )
     as_of = case.now.date()
-    before, _ = _exposures(RuleInput(case.profile, case.recommendation, as_of))
-    after, _ = _exposures(RuleInput(larger, case.recommendation, as_of))
+    smaller_portfolio = _exposures(RuleInput(case.profile, case.recommendation, as_of)).after
+    larger_portfolio = _exposures(RuleInput(larger, case.recommendation, as_of)).after
     buckets = [("instrument", grown.instrument_id), ("issuer", grown.issuer)]
     if grown.sector is not None:
         buckets.append(("sector", grown.sector))
     event(f"exposure: grew a position by {'nothing' if delta == ZERO else 'something'}")
     for bucket in buckets:
-        increase = after[bucket] - before[bucket]
+        increase = larger_portfolio[bucket] - smaller_portfolio[bucket]
         assert increase >= ZERO, f"{bucket} fell when the position grew"
         assert increase <= delta, f"{bucket} rose by more than the position did"
 
@@ -1354,12 +1360,223 @@ def test_concentration_fires_exactly_when_a_bucket_exceeds_the_limit(case: Case)
         return
     assert isinstance(outcome, Refusal)
     reason = next(r for r in outcome.reasons if r.code is RefusalCode.CONCENTRATION_BREACH)
-    described = "; ".join(
-        f"{DIMENSIONS[index]} {value} at {spec_percent(amount, total)}"
-        for index, value, amount in breaches
-    )
-    assert described in reason.detail
+    # Each bucket is named with its post-recommendation share, and they appear in the
+    # declared dimension order. Matched fragment by fragment rather than as one joined
+    # string, because each entry now carries what the bucket was before as well.
+    positions = []
+    for index, value, amount in breaches:
+        fragment = f"{DIMENSIONS[index]} {value} at {spec_percent(amount, total)}"
+        assert fragment in reason.detail, fragment
+        positions.append(reason.detail.index(fragment))
+    assert positions == sorted(positions)
     assert spec_percent(SPEC_CONCENTRATION_LIMIT, Decimal(1)) in reason.detail
+
+
+# ---------------------------------------------------------------------------
+# Whose breach it is, stated as an equivalence
+#
+# The two rules that read the portfolio can object to exposure the client already held.
+# Each states a `BreachOrigin` saying what the recommendation does to that exposure, and
+# the outcome does not depend on it: a `reduced` breach refuses exactly as a `created`
+# one does. What follows recomputes the origin from the documented rules rather than
+# from the engine, so that a mutant which reports every breach as `created` — or which
+# quietly turns `reduced` into a pass — fails here.
+# ---------------------------------------------------------------------------
+
+SPEC_ORIGIN_SEVERITY: dict[BreachOrigin, int] = {
+    BreachOrigin.REDUCED: 0,
+    BreachOrigin.UNCHANGED: 1,
+    BreachOrigin.INCREASED: 2,
+    BreachOrigin.CREATED: 3,
+}
+"""Least to most severe. Restated so a mutant to `BREACH_ORIGIN_SEVERITY` fails."""
+
+
+def spec_before_exposures(case: Case) -> tuple[dict[tuple[str, str], Decimal], Decimal]:
+    """Return the documented portfolio's exposure per bucket, and its total.
+
+    The "before" half of `spec_exposures`: what the client held when the recommendation
+    was made, with nothing about the recommendation applied to it.
+    """
+    exposure = _spec_holdings_exposure(case.profile)
+    total = sum((holding.market_value.amount for holding in case.profile.holdings), ZERO)
+    return exposure, total
+
+
+def spec_concentration_origin(
+    before: Decimal,
+    after: Decimal,
+    *,
+    breached_before: bool,
+) -> BreachOrigin:
+    """Classify a breaching bucket, as the concentration rule documents it.
+
+    Created is decided by whether the bucket was over the limit before, and direction by
+    the exposure amount — never by the share, so that a purchase which dilutes an
+    over-concentrated position by enlarging the portfolio counts as `UNCHANGED`.
+    """
+    if not breached_before:
+        return BreachOrigin.CREATED
+    if after > before:
+        return BreachOrigin.INCREASED
+    if after < before:
+        return BreachOrigin.REDUCED
+    return BreachOrigin.UNCHANGED
+
+
+def spec_risk_origin(before: Decimal, after: Decimal) -> BreachOrigin:
+    """Classify a risk objection, as the risk rule documents it.
+
+    The objection is to holding the product at all, so `CREATED` means the profile
+    documents no position and the recommendation would open one. No position on either
+    side is `UNCHANGED`: nothing was created and nothing was reduced.
+    """
+    if after > before:
+        return BreachOrigin.CREATED if before <= ZERO else BreachOrigin.INCREASED
+    if after < before:
+        return BreachOrigin.REDUCED
+    return BreachOrigin.UNCHANGED
+
+
+def spec_most_severe(origins: list[BreachOrigin]) -> BreachOrigin:
+    """Return the most severe origin, as a reason covering several breaches reports it."""
+    return max(origins, key=lambda origin: SPEC_ORIGIN_SEVERITY[origin])
+
+
+def origin_for(outcome: SuitabilityOutcome, code: RefusalCode) -> BreachOrigin | None:
+    """Return the origin the outcome states for `code`, or `None` if it did not fire."""
+    if isinstance(outcome, Determination):
+        return None
+    return next((r.breach_origin for r in outcome.reasons if r.code is code), None)
+
+
+@given(CASES)
+def test_every_reason_states_an_origin_exactly_when_its_rule_reads_the_portfolio(
+    case: Case,
+) -> None:
+    """Only the two portfolio-reading rules state an origin, and they always state one.
+
+    Tightening: the models enforce the same invariant, so on its own this would test
+    pydantic. What it adds is that the engine reaches the invariant through every route
+    into a refusal — including the merge of same-code reasons, which builds a
+    `RefusalReason` of its own and could drop the field on the way through.
+    """
+    outcome = decide(case)
+    if isinstance(outcome, Determination):
+        return
+    for reason in outcome.reasons:
+        assert (reason.breach_origin is not None) is (reason.code in BREACH_ORIGIN_CODES), (
+            f"{reason.code} disagreed about whether it states an origin"
+        )
+
+
+@given(CASES)
+def test_a_concentration_refusal_reports_the_most_severe_origin_among_its_breaches(
+    case: Case,
+) -> None:
+    """The origin is recomputed bucket by bucket and must match what the receipt says.
+
+    Tightening: an engine that reported `CREATED` for everything would still refuse the
+    right cases, so the code alone cannot catch it, and neither can a property that only
+    asks whether *an* origin is present. This restates the classification from the
+    documented rule and requires equality — including the aggregation, so that a
+    recommendation reducing one breach while creating another cannot report as a
+    reduction.
+    """
+    reported = origin_for(decide(case), RefusalCode.CONCENTRATION_BREACH)
+    if reported is None:
+        return
+    after, after_total = spec_exposures(case)
+    before, before_total = spec_before_exposures(case)
+    limit = SPEC_CONCENTRATION_LIMIT
+    origins = [
+        spec_concentration_origin(
+            before.get(bucket, ZERO),
+            amount,
+            breached_before=before.get(bucket, ZERO) > before_total * limit,
+        )
+        for bucket, amount in after.items()
+        if amount > after_total * limit
+    ]
+    assert origins
+    event(f"origin: concentration {spec_most_severe(origins).value}")
+    assert reported is spec_most_severe(origins)
+
+
+@given(CASES)
+def test_a_risk_refusal_reports_what_it_does_to_the_position(case: Case) -> None:
+    """The risk origin is the documented position before against the position after.
+
+    Tightening: the risk rule reads the portfolio only to classify, never to decide, so
+    a mutant that ignored the holdings entirely would still refuse exactly the same
+    cases. This is the property that sees the difference.
+    """
+    reported = origin_for(decide(case), RefusalCode.RISK_MISMATCH)
+    if reported is None:
+        return
+    bucket = ("instrument", case.recommendation.product.instrument_id)
+    after, _ = spec_exposures(case)
+    before, _ = spec_before_exposures(case)
+    expected = spec_risk_origin(before.get(bucket, ZERO), after.get(bucket, ZERO))
+    event(f"origin: risk {expected.value}")
+    assert reported is expected
+
+
+@given(CASES)
+def test_a_disposal_is_never_reported_as_creating_the_position_it_reduces(case: Case) -> None:
+    """A sell of a documented position never reads as `CREATED` under `risk_mismatch`.
+
+    That rule measures one bucket — the client's position in the product — so a disposal
+    of a documented position can only ever move it downwards.
+
+    Tightening: the equivalence above is exact, so this is implied by it, but it is the
+    direction the original defect took and it fails on its own without depending on the
+    whole recomputation being right. It is also what would fail first if the
+    classification were rewired to read shares instead of amounts, since a disposal
+    shrinks the portfolio a share is measured against.
+    """
+    if case.recommendation.action is not TradeAction.SELL:
+        return
+    bucket = ("instrument", case.recommendation.product.instrument_id)
+    before, _ = spec_before_exposures(case)
+    if before.get(bucket, ZERO) <= ZERO:
+        event("disposal: nothing documented to dispose of")
+        return
+    event("disposal: a documented position sold down")
+    assert origin_for(decide(case), RefusalCode.RISK_MISMATCH) is not BreachOrigin.CREATED
+
+
+@given(CASES)
+def test_a_concentration_breach_reads_as_created_only_when_a_bucket_newly_breaches(
+    case: Case,
+) -> None:
+    """`CREATED` is reported exactly when some breaching bucket was inside the limit before.
+
+    Deliberately stated over the aggregate rather than per bucket, because a disposal can
+    create a breach in a bucket it never touches: selling one position shrinks the
+    portfolio every other bucket is measured against, so a holding that sat at exactly
+    the limit can be over it afterwards without having moved. The rule reports that as
+    created, and it is created — the recommendation is what put the bucket over the line.
+    A property saying "a sell is never `CREATED`" would be false, and would have to be
+    weakened by exempting the very case worth knowing about.
+
+    Tightening: this pins the aggregation from the outside. An engine that reported the
+    first bucket's origin instead of the most severe passes the per-bucket equivalence on
+    every single-breach case and fails here as soon as two buckets disagree.
+    """
+    reported = origin_for(decide(case), RefusalCode.CONCENTRATION_BREACH)
+    if reported is None:
+        return
+    after, after_total = spec_exposures(case)
+    before, before_total = spec_before_exposures(case)
+    limit = SPEC_CONCENTRATION_LIMIT
+    newly = [
+        bucket
+        for bucket, amount in after.items()
+        if amount > after_total * limit and before.get(bucket, ZERO) <= before_total * limit
+    ]
+    event(f"concentration: {len(newly)} bucket(s) newly over the limit")
+    assert (reported is BreachOrigin.CREATED) is bool(newly)
 
 
 # ---------------------------------------------------------------------------
@@ -1374,11 +1591,11 @@ def test_concentration_fires_exactly_when_a_bucket_exceeds_the_limit(case: Case)
 
 def _concentration_margin(case: Case) -> Decimal | None:
     """Return how far the most concentrated bucket sits above the configured limit."""
-    exposure, total = _exposures(RuleInput(case.profile, case.recommendation, case.now.date()))
-    if total <= ZERO:
+    exposures = _exposures(RuleInput(case.profile, case.recommendation, case.now.date()))
+    if exposures.after_total <= ZERO:
         return None
-    limit = total * SPEC_CONCENTRATION_LIMIT
-    return max((amount - limit for amount in exposure.values()), default=None)
+    limit = exposures.after_total * SPEC_CONCENTRATION_LIMIT
+    return max((amount - limit for amount in exposures.after.values()), default=None)
 
 
 def _liquidity_margin(case: Case) -> Decimal | None:

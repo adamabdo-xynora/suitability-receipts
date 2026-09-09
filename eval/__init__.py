@@ -8,10 +8,15 @@ The engine had rules and no evidence they were calibrated. Three numbers in
 This package is what turns them into measured decisions or, where the evidence does not
 reach, records plainly that they are still guesses.
 
-It is also where a question left open during the engine build gets an answer: a `sell`
-that reduces an over-concentrated position without curing it currently refuses. The
-concentration cases in `cases.py` state what each of those should be, and why, and the
-scorer reports where the engine disagrees.
+It is also where a question left open during the engine build got an answer: a `sell`
+that reduces an over-concentrated position without curing it refuses. The concentration
+cases in `cases.py` state what each of those should be, and why, and the scorer reports
+where the engine disagrees. Two of them disagreed. The refusals were kept and the finding
+was split — a reason from either portfolio-reading rule now states a `BreachOrigin`, so a
+disposal that reduces an inherited breach and a purchase that creates one no longer
+produce the same receipt. The `why` on each of those cases carries the argument it made
+before the answer, so the record shows what was traded away rather than only where it
+landed.
 
 How the expectations were derived
 ---------------------------------

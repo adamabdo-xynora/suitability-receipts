@@ -14,9 +14,9 @@ Four outcomes, and they are not equally bad
     The engine's outcome and its refusal codes are both what the case says.
 `WRONG_REASON`
     The engine refused, as the case said it should, but not for the codes the case
-    named. The receipt is right at the top and wrong in the part an advisor would act
-    on, and a set that only compared supported-versus-refused would score this as a
-    pass.
+    named — or not with the missing factors or the breach origin it named. The receipt
+    is right at the top and wrong in the part an advisor would act on, and a set that
+    only compared supported-versus-refused would score this as a pass.
 `OVER_REFUSAL`
     The engine refused something the set says is supported. This is the failure mode a
     determination engine drifts into on its own, because every tightening looks
@@ -45,6 +45,7 @@ from types import MappingProxyType
 
 from eval.cases import CASES, NOW, Category, EvalCase
 from suitability_receipts import (
+    BreachOrigin,
     Determination,
     FactorKey,
     RefusalCode,
@@ -130,6 +131,17 @@ class CaseResult:
             return frozenset()
         return frozenset(key for reason in self.outcome.reasons for key in reason.missing_factors)
 
+    @property
+    def actual_origins(self) -> frozenset[BreachOrigin]:
+        """The breach origins the engine stated, across every reason that states one."""
+        if isinstance(self.outcome, Determination):
+            return frozenset()
+        return frozenset(
+            reason.breach_origin
+            for reason in self.outcome.reasons
+            if reason.breach_origin is not None
+        )
+
 
 @dataclass(frozen=True)
 class CategoryScore:
@@ -207,6 +219,11 @@ def classify(case: EvalCase, outcome: SuitabilityOutcome) -> Classification:
     subset. When the case also names the factors a missing-factor refusal must report,
     those are compared too: four routes to `missing_kyc_factor` are four different
     claims, and a check that only compared codes would collapse them into one.
+
+    `expected_origins` is compared the same way, and for the same reason. A `sell` that
+    reduces an inherited breach and a `buy` that creates one both refuse under the same
+    code; a set that stopped at the code would score the engine full marks for reporting
+    them identically, which is precisely the conflation these cases were written about.
     """
     if case.expected_outcome != outcome.outcome:
         return (
@@ -225,6 +242,12 @@ def classify(case: EvalCase, outcome: SuitabilityOutcome) -> Classification:
             key for reason in outcome.reasons for key in reason.missing_factors
         )
         if actual_missing != case.expected_missing:
+            return Classification.WRONG_REASON
+    if case.expected_origins is not None:
+        actual_origins = frozenset(
+            reason.breach_origin for reason in outcome.reasons if reason.breach_origin is not None
+        )
+        if actual_origins != case.expected_origins:
             return Classification.WRONG_REASON
     return Classification.PASSED
 
@@ -284,6 +307,11 @@ def _codes(codes: frozenset[RefusalCode]) -> str:
 def _keys(keys: frozenset[FactorKey]) -> str:
     """Render a factor-key set for the report, in a fixed order."""
     return ", ".join(sorted(key.value for key in keys)) if keys else "(none)"
+
+
+def _origins(origins: frozenset[BreachOrigin]) -> str:
+    """Render a breach-origin set for the report, in a fixed order."""
+    return ", ".join(sorted(origin.value for origin in origins)) if origins else "(none)"
 
 
 def _wrap(text: str, width: int, indent: str) -> list[str]:
@@ -356,6 +384,9 @@ def _failure(result: CaseResult) -> list[str]:
     if case.expected_missing is not None:
         lines.append(f"  missing expected: {_keys(case.expected_missing)}")
         lines.append(f"  missing reported: {_keys(result.actual_missing)}")
+    if case.expected_origins is not None:
+        lines.append(f"  origin expected : {_origins(case.expected_origins)}")
+        lines.append(f"  origin reported : {_origins(result.actual_origins)}")
     lines.append("  why the set expects that:")
     lines.extend(_wrap(case.why, 86, "    "))
     lines.append("")

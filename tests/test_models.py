@@ -15,6 +15,9 @@ from hypothesis import strategies as st
 from pydantic import TypeAdapter, ValidationError
 
 from suitability_receipts import (
+    BREACH_ORIGIN_CODES,
+    BREACH_ORIGIN_SEVERITY,
+    BreachOrigin,
     ClientProfile,
     Currency,
     Determination,
@@ -423,6 +426,11 @@ def test_refusal_carries_every_reason_that_fired() -> None:
     assert len(refusal.reasons) == 2
 
 
+def _origin_for(code: RefusalCode) -> dict[str, object]:
+    """The `breach_origin` field a code needs, and nothing when it may not carry one."""
+    return {"breach_origin": BreachOrigin.CREATED} if code in BREACH_ORIGIN_CODES else {}
+
+
 @pytest.mark.parametrize(
     ("code", "expected_field"),
     [
@@ -442,13 +450,19 @@ def test_refusal_reason_requires_its_own_evidence(code: RefusalCode, expected_fi
         "conflicting_factors": (a_citation(),),
         "unsupported_claims": (a_citation(),),
     }
+    origin = _origin_for(code)
     reason = RefusalReason.model_validate(
-        {"code": code, "detail": "Synthetic detail.", expected_field: evidence[expected_field]},
+        {
+            "code": code,
+            "detail": "Synthetic detail.",
+            expected_field: evidence[expected_field],
+            **origin,
+        },
     )
     assert reason.code is code
 
     with pytest.raises(ValidationError, match="requires non-empty"):
-        RefusalReason.model_validate({"code": code, "detail": "Synthetic detail."})
+        RefusalReason.model_validate({"code": code, "detail": "Synthetic detail.", **origin})
 
     for wrong_field, wrong_value in evidence.items():
         if wrong_field == expected_field:
@@ -460,8 +474,59 @@ def test_refusal_reason_requires_its_own_evidence(code: RefusalCode, expected_fi
                     "detail": "Synthetic detail.",
                     expected_field: evidence[expected_field],
                     wrong_field: wrong_value,
+                    **origin,
                 },
             )
+
+
+@pytest.mark.parametrize("code", list(RefusalCode))
+def test_refusal_reason_states_an_origin_exactly_when_its_code_permits_one(
+    code: RefusalCode,
+) -> None:
+    """A portfolio-reading code must state an origin; every other code may not carry one.
+
+    Both halves matter. Without the first, an engine could report a breach without saying
+    whose it is — the conflation this field exists to end. Without the second, `origin` on
+    a `stale_profile` refusal would be a field that means nothing, and a reader would have
+    to guess whether it was meaningful there.
+    """
+    evidence: dict[str, object] = (
+        {"missing_factors": (FactorKey.RISK_TOLERANCE,)}
+        if code is RefusalCode.MISSING_KYC_FACTOR
+        else {"unsupported_claims": (a_citation(),)}
+        if code is RefusalCode.UNSUPPORTED_RATIONALE
+        else {"conflicting_factors": (a_citation(),)}
+    )
+    fields: dict[str, object] = {"code": code, "detail": "Synthetic detail.", **evidence}
+
+    if code in BREACH_ORIGIN_CODES:
+        with pytest.raises(ValidationError, match="requires a breach_origin"):
+            RefusalReason.model_validate(fields)
+        stated = RefusalReason.model_validate({**fields, "breach_origin": BreachOrigin.REDUCED})
+        assert stated.breach_origin is BreachOrigin.REDUCED
+        return
+
+    assert RefusalReason.model_validate(fields).breach_origin is None
+    with pytest.raises(ValidationError, match="must not carry a breach_origin"):
+        RefusalReason.model_validate({**fields, "breach_origin": BreachOrigin.CREATED})
+
+
+def test_breach_origin_severity_is_a_total_order() -> None:
+    """Every origin is ranked, no two share a rank, and `created` is the most severe."""
+    assert set(BREACH_ORIGIN_SEVERITY) == set(BreachOrigin)
+    assert len(set(BREACH_ORIGIN_SEVERITY.values())) == len(BreachOrigin)
+    assert max(BreachOrigin, key=lambda origin: BREACH_ORIGIN_SEVERITY[origin]) is (
+        BreachOrigin.CREATED
+    )
+    assert min(BreachOrigin, key=lambda origin: BREACH_ORIGIN_SEVERITY[origin]) is (
+        BreachOrigin.REDUCED
+    )
+
+
+def test_breach_origin_codes_are_the_two_rules_that_read_the_portfolio() -> None:
+    """Named explicitly, so that adding a code silently to the set is a failing test."""
+    expected = frozenset({RefusalCode.RISK_MISMATCH, RefusalCode.CONCENTRATION_BREACH})
+    assert expected == BREACH_ORIGIN_CODES
 
 
 # ---------------------------------------------------------------------------
@@ -517,6 +582,7 @@ def a_reason_with_detail(detail: str) -> RefusalReason:
         code=RefusalCode.RISK_MISMATCH,
         detail=detail,
         conflicting_factors=(a_citation(),),
+        breach_origin=BreachOrigin.CREATED,
     )
 
 

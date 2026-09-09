@@ -5,6 +5,15 @@ Every expectation here was derived by reading the inputs against the rules as
 running the engine. Where the two disagree, the disagreement is the finding — see the
 `why` on each case and the report the scorer prints.
 
+Two cases here no longer state a disagreement; they state a resolution. Both expected
+`supported` for a `sell` that reduced an exposure the rules were objecting to, the engine
+refused both, and the argument was settled against the expectation on the outcome and in
+its favour on the finding: the refusals stand, and the receipt now says whether the breach
+was created by the recommendation or inherited from the portfolio and reduced by it. The
+`why` on each keeps the case it originally made, so a reader can see what was traded away
+and what was bought. A revised expectation is worth more when the revision is legible than
+when it is rewritten to look as though it was always right.
+
 All client data is synthetic and obviously so, following the convention
 `tests/synthetic.py` established: identifiers carry the reserved `SYNTHETIC-` prefix and
 every name is a visible placeholder. Nothing here resembles a real person, and no
@@ -25,7 +34,10 @@ The five categories
     probed at its edge is a threshold nobody has actually tested.
 `concentration`
     The question left open when the engine was built: what a `sell` against an
-    over-concentrated position should produce. Each case states a position.
+    over-concentrated position should produce. Each case states a position, and together
+    they pin the answer that was reached — a disposal that leaves a breach in place still
+    refuses, but the reason says `reduced` where a purchase's would say `created`, and
+    dilution by a larger denominator counts as neither.
 `tension`
     Profiles that disagree with themselves — documented tolerance against stated
     objective. Includes a case where the tension exists and must *not* refuse, because
@@ -39,6 +51,7 @@ from enum import StrEnum
 from typing import Literal
 
 from suitability_receipts import (
+    BreachOrigin,
     ClientProfile,
     Currency,
     FactorCitation,
@@ -107,6 +120,12 @@ class EvalCase:
     `expected_missing` is asserted only when supplied. It names the profile factors a
     `missing_kyc_factor` refusal must report, which is what separates four different
     routes to the same code from four copies of one test.
+
+    `expected_origins` is asserted the same way, and names the `BreachOrigin` values the
+    refusal must state across its reasons. Without it, a case that expects
+    `concentration_breach` cannot tell a `sell` that halves an inherited breach from a
+    `buy` that creates one — they carry the same code, and the whole point of these two
+    cases is that they are not the same finding.
     """
 
     name: str
@@ -117,6 +136,7 @@ class EvalCase:
     why: str
     expected_codes: frozenset[RefusalCode] = frozenset()
     expected_missing: frozenset[FactorKey] | None = None
+    expected_origins: frozenset[BreachOrigin] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -322,7 +342,49 @@ _REFUSAL_CODE_CASES: tuple[EvalCase, ...] = (
             "the product at medium-to-high. A high-rated fund is above both. The lock-up, "
             "redemption terms, liquidity and concentration are all unchanged from the "
             "supported baseline, so the risk rating is the only thing wrong and the only "
-            "code that should fire."
+            "code that should fire. The exposure is the recommendation's own doing — the "
+            "profile documents no position in FUND-Z — so the refusal must say `created`, "
+            "which is what the case below is the other half of."
+        ),
+        expected_origins=frozenset({BreachOrigin.CREATED}),
+    ),
+    EvalCase(
+        name="a partial sell of a holding rated above the documented tolerance",
+        category=Category.REFUSAL_CODE,
+        profile=a_profile(),
+        recommendation=a_recommendation(
+            action=TradeAction.SELL,
+            product=held_product("A", risk_rating=RiskLevel.HIGH),
+            amount=cad("5000.00"),
+        ),
+        expected_outcome="refused",
+        expected_codes=frozenset({RefusalCode.RISK_MISMATCH}),
+        expected_origins=frozenset({BreachOrigin.REDUCED}),
+        why=(
+            "POSITION, revised — and the revision is the point, so the original argument "
+            "stays here rather than being tidied away. This case was written in the "
+            "`supported` category expecting no refusal at all. The reading behind that: "
+            "the risk rule did not look at the action, so it treated a sale of a too-risky "
+            "holding exactly like a purchase of one, and after this trade the client holds "
+            "10,000 of the high-rated fund instead of 15,000 — strictly less of the thing "
+            "the tolerance cannot support. Refusing it looked like refusing the remedy for "
+            "the condition being refused for, and it left an advisor reducing an unsuitable "
+            "position with no receipt for having done so. The engine refused; the "
+            "disagreement was recorded rather than argued away. What the argument won was "
+            "the finding, not the outcome. The refusal stands, because the objection is to "
+            "the product's risk rating, which is a fact about the product that no disposal "
+            "changes, and because a determination reading `supported` over a client still "
+            "holding a fund above their documented tolerance would assert more than it can "
+            "support — the failure this repository exists to prevent. What was actually "
+            "wrong was the conflation. The refusal now carries `breach_origin=reduced` and "
+            "states both sides of the position in figures, so the receipt for a staged "
+            "de-risking is legibly different from the receipt for the purchase that opened "
+            "the exposure, and the advisor does get a record of having reduced it. The case "
+            "left the `supported` category when its expectation flipped: that category is "
+            "the over-refusal guard, and a refusal case sitting in it would falsify what "
+            "the category claims about itself. No other rule objects — 5,000 of a 90,000 "
+            "portfolio moves no bucket past the limit, a sale consumes no liquidity, and "
+            "the fund redeems daily — so `risk_mismatch` is still the only code."
         ),
     ),
     EvalCase(
@@ -431,12 +493,15 @@ _REFUSAL_CODE_CASES: tuple[EvalCase, ...] = (
             },
         ),
         expected_missing=frozenset({FactorKey.RISK_TOLERANCE}),
+        expected_origins=frozenset({BreachOrigin.CREATED}),
         why=(
             "Three independent things are wrong and the refusal must carry all three. "
             "Tolerance is undocumented. The 30,000 purchase leaves nothing of a 30,000 "
             "liquid position against a documented 25,000 requirement. And it takes the "
-            "new fund to 30,000 of a 120,000 portfolio — 25%, past the configured 20%. "
-            "Reporting whichever fired first would understate the state of the file."
+            "new fund to 30,000 of a 120,000 portfolio — 25%, past the configured 20%, "
+            "in a portfolio that breached nothing before it, so the concentration reason "
+            "must say `created`. Reporting whichever fired first would understate the "
+            "state of the file."
         ),
     ),
     EvalCase(
@@ -608,27 +673,6 @@ _SUPPORTED_CASES: tuple[EvalCase, ...] = (
             "just a preference for low-rated products."
         ),
     ),
-    EvalCase(
-        name="a partial sell of a holding rated above the documented tolerance",
-        category=Category.SUPPORTED,
-        profile=a_profile(),
-        recommendation=a_recommendation(
-            action=TradeAction.SELL,
-            product=held_product("A", risk_rating=RiskLevel.HIGH),
-            amount=cad("5000.00"),
-        ),
-        expected_outcome="supported",
-        why=(
-            "POSITION, not a reading: the engine's risk rule does not look at the action, "
-            "so it treats a sale of a too-risky holding the same as a purchase of one. "
-            "After this trade the client holds 10,000 of the high-rated fund instead of "
-            "15,000 — strictly less of the thing the tolerance cannot support. Refusing "
-            "it refuses the remedy for the condition being refused, and leaves an advisor "
-            "reducing an unsuitable position with no receipt for having done so. No other "
-            "rule objects: 5,000 of a 90,000 portfolio moves no bucket past the limit, a "
-            "sale consumes no liquidity, and the fund redeems daily."
-        ),
-    ),
 )
 
 _CEILING_CLAIMS = (
@@ -719,11 +763,15 @@ _BOUNDARY_CASES: tuple[EvalCase, ...] = (
         recommendation=a_recommendation(amount=cad("22500.01")),
         expected_outcome="refused",
         expected_codes=frozenset({RefusalCode.CONCENTRATION_BREACH}),
+        expected_origins=frozenset({BreachOrigin.CREATED}),
         why=(
             "22,500.01 of a 112,500.01 portfolio is 20.000008%, past the limit by the "
             "smallest amount the money type can express. The purchase clears liquidity "
-            "with 177,499.99 remaining, so concentration is the only code. A threshold "
-            "that does not fire one cent above itself is not enforced."
+            "with 177,499.99 remaining, so concentration is the only code, and the "
+            "portfolio it went into breached nothing, so the origin is `created` by a "
+            "cent. A threshold that does not fire one cent above itself is not enforced, "
+            "and an origin that could not attribute a one-cent breach to the trade that "
+            "caused it would not be attributing anything."
         ),
     ),
     EvalCase(
@@ -768,11 +816,14 @@ _BOUNDARY_CASES: tuple[EvalCase, ...] = (
         ),
         expected_outcome="refused",
         expected_codes=frozenset({RefusalCode.RISK_MISMATCH}),
+        expected_origins=frozenset({BreachOrigin.CREATED}),
         why=(
             "A high-rated fund against a growth objective, one rank above the ceiling the "
             "objective implies. The documented tolerance is high and would permit it, "
             "which is the point: the objective must be able to lower the ceiling on its "
-            "own, or the mapping decorates the determination instead of constraining it."
+            "own, or the mapping decorates the determination instead of constraining it. "
+            "It is a purchase of a fund the profile documents no position in, so the "
+            "origin is `created`."
         ),
     ),
 )
@@ -787,26 +838,35 @@ _CONCENTRATION_CASES: tuple[EvalCase, ...] = (
             product=held_product("A"),
             amount=cad("15000.00"),
         ),
-        expected_outcome="supported",
+        expected_outcome="refused",
+        expected_codes=frozenset({RefusalCode.CONCENTRATION_BREACH}),
+        expected_origins=frozenset({BreachOrigin.REDUCED}),
         why=(
-            "POSITION, stated before scoring. The client holds 40,000 of FUND-A in a "
-            "100,000 portfolio — 40%, twice the configured limit, and a breach that "
-            "existed before anyone proposed anything. Selling 15,000 takes it to 25,000 "
-            "of 85,000: 29.41%, still over the limit but materially closer to it. The "
-            "engine refuses this, and the refusal is a statement about the portfolio "
-            "rather than about the recommendation. Two things make that the wrong answer. "
-            "First, it gives the same verdict to a trade that halves the breach and a "
-            "trade that creates one, so the code stops distinguishing the advisor's "
-            "proposal from the client's history. Second, staged de-risking is ordinary "
-            "practice, and under the current rule every stage but the last refuses — the "
-            "rule refuses the remedy for the condition it is refusing for. A sale that "
-            "strictly reduces the fraction in every breaching bucket should be supported. "
-            "The cost of that change is real and belongs in the record: the resulting "
-            "receipt would say 'supported' about a portfolio still holding 29.41% in one "
-            "name, and a `Determination` has nowhere to record the residual breach. If "
-            "the maintainer will not accept a silent pass, the alternative fix is to keep "
-            "refusing but say which of the two situations it is — the outcome would stay, "
-            "and the conflation would not."
+            "POSITION, stated before scoring and then revised by what the scoring showed. "
+            "The original argument, kept because the revision only makes sense against it: "
+            "the client holds 40,000 of FUND-A in a 100,000 portfolio — 40%, twice the "
+            "configured limit, and a breach that existed before anyone proposed anything. "
+            "Selling 15,000 takes it to 25,000 of 85,000: 29.41%, still over the limit but "
+            "materially closer to it. The engine refused, and the refusal was a statement "
+            "about the portfolio rather than about the recommendation. Two things were "
+            "wrong with that. First, it gave the same verdict to a trade that halves the "
+            "breach and a trade that creates one, so the code stopped distinguishing the "
+            "advisor's proposal from the client's history. Second, staged de-risking is "
+            "ordinary practice, and every stage but the last refused — the rule refused "
+            "the remedy for the condition it was refusing for. The case therefore asked "
+            "for `supported`, while naming the cost of that honestly: the receipt would "
+            "say 'supported' about a portfolio still holding 29.41% in one name, and a "
+            "`Determination` has nowhere to record a residual breach. That cost is what "
+            "decided it. Asserting support for a portfolio a third of the way into one "
+            "name is asserting more than the engine can support, which is the thing this "
+            "repository argues against, and no amount of improvement makes an over-limit "
+            "portfolio an under-limit one. So the alternative the case itself named is the "
+            "one taken: keep refusing, and say which of the two situations it is. The "
+            "outcome stays, the conflation does not. The reason now carries "
+            "`breach_origin=reduced` and its detail gives every breaching bucket as 29.41% "
+            "against the 40.00% it was, so the residual is visible and so is the direction "
+            "of travel — the advisor has a receipt for the stage they completed, and it "
+            "cannot be mistaken for a receipt for having caused the concentration."
         ),
     ),
     EvalCase(
@@ -837,12 +897,17 @@ _CONCENTRATION_CASES: tuple[EvalCase, ...] = (
         recommendation=a_recommendation(amount=cad("30000.00")),
         expected_outcome="refused",
         expected_codes=frozenset({RefusalCode.CONCENTRATION_BREACH}),
+        expected_origins=frozenset({BreachOrigin.CREATED}),
         why=(
             "A well-diversified 90,000 portfolio, and a 30,000 purchase that takes the "
             "new fund to 25% of the resulting 120,000 — past the configured limit in "
             "instrument, issuer and sector at once. Here the breach is entirely the "
-            "recommendation's doing, which is precisely the case the rule exists for. "
-            "Liquidity clears at 170,000 remaining, so this is a single-code refusal."
+            "recommendation's doing, which is precisely the case the rule exists for, and "
+            "the origin must say `created`. It is the control for the reducing sell above: "
+            "the two now share a code and must not share a finding, so a set that checked "
+            "only the code would score an engine that reports them identically as correct "
+            "on both. Liquidity clears at 170,000 remaining, so this is a single-code "
+            "refusal."
         ),
     ),
     EvalCase(
@@ -852,6 +917,7 @@ _CONCENTRATION_CASES: tuple[EvalCase, ...] = (
         recommendation=a_recommendation(),
         expected_outcome="refused",
         expected_codes=frozenset({RefusalCode.CONCENTRATION_BREACH}),
+        expected_origins=frozenset({BreachOrigin.UNCHANGED}),
         why=(
             "The 40% position in FUND-A is untouched by a 10,000 purchase of an unrelated "
             "fund, and the purchase does lower A's share to 36.36% by enlarging the "
@@ -859,7 +925,11 @@ _CONCENTRATION_CASES: tuple[EvalCase, ...] = (
             "exposure to FUND-A is the same 40,000 it was, and the arithmetic improvement "
             "is an artefact of putting more money in. Refusing is right, and the "
             "distinction from the reducing sell is exactly the one the rule should be "
-            "drawing — a disposal reduces exposure, growth of the denominator dilutes it."
+            "drawing — a disposal reduces exposure, growth of the denominator dilutes it. "
+            "So the origin must be `unchanged` and not `reduced`, even though the "
+            "percentage fell. This is the case that forces the rule to read the exposure "
+            "amount rather than the fraction: a rule that classified on the share would "
+            "call this a reduction and hand a dilution the receipt earned by a sale."
         ),
     ),
     EvalCase(
@@ -873,12 +943,16 @@ _CONCENTRATION_CASES: tuple[EvalCase, ...] = (
         ),
         expected_outcome="refused",
         expected_codes=frozenset({RefusalCode.CONCENTRATION_BREACH}),
+        expected_origins=frozenset({BreachOrigin.UNCHANGED}),
         why=(
             "A hold is a recommendation to keep the 40% position exactly as it is. "
             "Nothing about the breach changes, and the recommendation is that it should "
-            "not. This is the contrast that keeps the carve-out proposed above narrow: "
+            "not. This is the contrast that keeps the distinction drawn above narrow: "
             "'the recommendation reduced the breach' has to mean an actual reduction, and "
-            "a hold reduces nothing."
+            "a hold reduces nothing, so the origin is `unchanged`. It is inherited, like "
+            "the reducing sell, and it is not doing anything about it — which is the whole "
+            "difference between the two, and now the only difference visible on the "
+            "receipt, since both refuse under the same code with the same 40.00% figure."
         ),
     ),
 )
@@ -899,6 +973,7 @@ _TENSION_CASES: tuple[EvalCase, ...] = (
         ),
         expected_outcome="refused",
         expected_codes=frozenset({RefusalCode.RISK_MISMATCH}),
+        expected_origins=frozenset({BreachOrigin.CREATED}),
         why=(
             "The file says two incompatible things: a low tolerance, which caps the "
             "product at low, and a speculative objective, which would allow anything. A "
@@ -925,6 +1000,7 @@ _TENSION_CASES: tuple[EvalCase, ...] = (
         ),
         expected_outcome="refused",
         expected_codes=frozenset({RefusalCode.RISK_MISMATCH}),
+        expected_origins=frozenset({BreachOrigin.CREATED}),
         why=(
             "The mirror image of the case above, and it must resolve the same way. Here "
             "the tolerance is the permissive half and the objective is the restrictive "

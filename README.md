@@ -71,6 +71,27 @@ These are the product. Each is a separately checked rule with its own tests.
 A single refusal may carry more than one reason. Reporting only the first one found would itself be
 a form of hedging. Every rule runs on every determination; the engine does not short-circuit.
 
+### Whose breach it is
+
+`risk_mismatch` and `concentration_breach` are the two rules that read the documented portfolio, so
+they are the two that can object to exposure the client already held. Their reasons carry a
+`breach_origin`, which the models require of those two codes and forbid on every other:
+
+| `breach_origin` | The recommendation |
+| --- | --- |
+| `created` | brings the objectionable exposure into being — a purchase of a fund above the ceiling, or a trade that puts a bucket over the limit |
+| `increased` | inherits it and adds to it |
+| `unchanged` | inherits it and does not move it — a hold, or an unrelated purchase that dilutes the share without disposing of anything |
+| `reduced` | inherits it and strictly reduces it, without bringing it inside the objection |
+
+This is not a softer outcome and does not create one. A `reduced` breach refuses with the same force
+as a `created` one, and the residual is stated on the receipt in figures — a sell that takes a
+position from 40% to 29.41% of the portfolio is refused, and the receipt says 29.41%. What the field
+buys is that an advisor unwinding a concentration the client arrived with is no longer recorded
+identically to one who built it. The distinction is drawn on the exposure **amount**, never on its
+share: growing the portfolio dilutes a percentage without disposing of anything, and dilution does
+not earn the receipt a disposal earns.
+
 A rule that cannot establish its basis refuses rather than passing without one. Where a profile is
 in tension with itself — a conservative risk tolerance against an aggressive stated objective, say —
 the engine takes the reading that does *not* produce a supported result. Those decisions are
@@ -182,24 +203,41 @@ supported-versus-refused comparison would collapse into two:
 | **over-refusal** | refused something the set says is supported |
 | **under-refusal** | supported something the set says must refuse — printed **above** the table, because the README's claim is that a supported receipt means all seven rules ran and none refused, and one instance falsifies that claim |
 
-17 of the 35 cases must *not* refuse. That half is the one most case sets skip, and skipping it
-scores an engine that refuses everything at full marks.
+15 of the 35 cases must *not* refuse. That half is the one most case sets skip, and skipping it
+scores an engine that refuses everything at full marks. A case may also name the `breach_origin` it
+expects, and 11 do — without that, a set would score an engine that reported a disposal and a
+purchase identically as correct on both.
 
 ### What it currently reports
 
-33 of 35 agree with the engine: no under-refusals, no wrong-reason refusals, and every boundary and
-factor-tension case lands where the reading said it would. Two cases disagree, both over-refusals,
-and both come from the same root cause — **the risk and concentration rules do not look at the
-recommendation's action**:
+35 of 35 agree with the engine: no under-refusals, no over-refusals, no wrong-reason refusals, and
+every boundary and factor-tension case lands where the reading said it would.
 
-- A partial **sell of a holding rated above the documented tolerance** refuses for `risk_mismatch`,
-  though it leaves the client holding strictly less of the thing the tolerance cannot support.
-- A **sell that reduces an over-concentration without curing it** refuses for
+It did not start there. Two cases disagreed, both over-refusals, and both from the same root cause —
+**the risk and concentration rules did not look at the recommendation's action**:
+
+- A partial **sell of a holding rated above the documented tolerance** refused for `risk_mismatch`,
+  though it left the client holding strictly less of the thing the tolerance cannot support.
+- A **sell that reduces an over-concentration without curing it** refused for
   `concentration_breach`, giving the same verdict to a trade that halves a breach and a trade that
   creates one.
 
-Both are open. The cases were not adjusted to match the engine, and the engine was not adjusted to
-match the cases: the disagreement is the finding, and the `why` on each case argues its side.
+Neither was resolved by moving the expectation to wherever the engine already was. Both cases asked
+for `supported` and named the cost of that honestly — a receipt reading "supported" over a portfolio
+still a third of the way into one name — and it was that cost which decided it. **The refusals
+stand, and the conflation does not**: each of those two rules now states a `breach_origin`, so the
+receipt says whether the recommendation created the breach or inherited and reduced it. The
+`why` on each case keeps the argument it originally made alongside the answer that was reached; the
+history of the decision is the point, and a revised expectation rewritten to look as though it was
+always right is worth less than one that shows its working.
+
+One thing the change surfaced that nobody had asked about: because every bucket is checked and not
+only the ones traded, a **disposal can create a breach in a bucket it never touches** — selling one
+position shrinks the portfolio the others are measured against, so a holding sitting exactly at the
+limit can be over it afterwards without having moved. That is reported as `created`, because it is,
+and it is why a reason covering several breaches carries the most severe origin among them rather
+than the one belonging to the instrument being traded. It was found by a property test, not by a
+case somebody thought of.
 
 ---
 
@@ -221,6 +259,11 @@ rules. The rules are pure functions over documented data.
 ### Mutation testing
 
 `mutmut` over `src/` generates 573 mutants. The suite kills 542 and 31 survive — a score of 94.59%.
+
+> **Stale as of the `breach_origin` change.** Those figures were measured before `BreachOrigin`, the
+> two origin classifiers and the before/after exposure split were added, so the mutant count is no
+> longer 573 and the accounting below no longer enumerates every survivor. The run has not been
+> repeated. Treat the number as the last measurement rather than the current one until it is.
 
 The score is the less interesting half. All 31 survivors were inspected individually, and every one
 is an equivalent mutant rather than a test gap. They fall into two groups. Some are substitutions on
@@ -279,7 +322,12 @@ Not built yet:
   enforced, not whether it is set in the right place, so `CONCENTRATION_LIMIT_FRACTION`,
   `PROFILE_REVIEW_INTERVAL_DAYS` and the rows of `OBJECTIVE_RISK_CEILING` stay labelled as
   repository choices. `RISK_RATING_SPELLINGS` is untouched by the eval set entirely.
-- **A decision on the two open over-refusals** above.
+- **A decision on whether a full disposal should still refuse.** Selling a position *entirely*
+  still refuses under `risk_mismatch`, with origin `reduced`: that rule objects to the product's
+  risk rating, which is a fact about the product that no disposal changes. Whether the objection
+  should lift once the exposure reaches zero is a real question and a different one from the
+  created-versus-inherited split, and it is not answered here. `tests/test_engine.py` pins the
+  current answer at the boundary rather than leaving it to chance.
 - **The regulatory section** below, which the maintainer is verifying by hand.
 
 ---
