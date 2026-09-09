@@ -106,7 +106,9 @@ __all__ = [
     "check_risk_mismatch",
     "check_stale_profile",
     "check_unsupported_rationale",
+    "citation_matches_profile",
     "determine",
+    "documented_citation",
 ]
 
 ENGINE_VERSION = "0.1.0"
@@ -658,6 +660,29 @@ def _claim_is_supported(profile: ClientProfile, claim: FactorCitation) -> bool:
         _normalise(documented.value) == _normalise(claim.value)
         and documented.documented_on == claim.documented_on
     )
+
+
+# ---------------------------------------------------------------------------
+# The profile reading, exposed
+#
+# Code outside the engine has to check a citation against the profile: the rationale
+# verifier in `suitability_receipts.llm` does exactly that, on prose the model wrote.
+# It reads the profile through these two functions rather than through its own copy of
+# the rendering, because a second implementation would be a second definition of what
+# the profile says, and the two would eventually disagree. When they disagreed, a
+# rationale could pass verification and then be refused by `check_unsupported_rationale`
+# on the same inputs — or, worse, the other way round.
+# ---------------------------------------------------------------------------
+
+
+def documented_citation(profile: ClientProfile, key: FactorKey) -> FactorCitation | None:
+    """Cite the profile's documented value for `key`, or `None` if it documents none."""
+    return _cite(profile, key)
+
+
+def citation_matches_profile(profile: ClientProfile, citation: FactorCitation) -> bool:
+    """Return whether the profile documents exactly what `citation` asserts."""
+    return _claim_is_supported(profile, citation)
 
 
 def check_unsupported_rationale(rule_input: RuleInput) -> RuleOutcome:

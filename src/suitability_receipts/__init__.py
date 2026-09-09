@@ -6,11 +6,15 @@ code against the documented client profile.
 
 Credentials
 -----------
-`ANTHROPIC_API_KEY` is read in exactly one place, and that place does not exist yet.
-When the LLM layer is added it will live at `suitability_receipts.llm.client`, which
-will be the only module permitted to read the environment for credentials; every other
-module will receive an already-constructed client by injection. Nothing in this package
-reads it today, and the determination rules never will — they do not call a model.
+`ANTHROPIC_API_KEY` is read in exactly one place: `suitability_receipts.llm.client`.
+That is the only module permitted to read the environment for credentials, and every
+other module receives an already-constructed client by injection. It is enforced rather
+than promised — `tests/test_llm_boundary.py` parses every module under `src/` and fails
+if any other one imports `os` or `anthropic`. The determination rules never touch it;
+they do not call a model.
+
+The model layer lives in `suitability_receipts.llm` and is imported explicitly. It is
+deliberately not re-exported here, so that importing this package imports no SDK.
 """
 
 from suitability_receipts.engine import (

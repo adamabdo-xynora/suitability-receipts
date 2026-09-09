@@ -93,6 +93,64 @@ limit".
 
 ---
 
+## The LLM layer
+
+The model does two things, and the code around it is arranged so that it cannot do a third.
+
+### It parses
+
+Free text in, a validated `Recommendation` out, through a single forced tool call against a strict
+schema — the model returns structure, never prose to be parsed. Every field the source text does not
+state is `null` in the schema, and a `null` refuses the parse rather than being read as a default: an
+unstated lock-up is not zero days, and unstated redemption terms are not daily liquidity.
+
+The product's **risk rating** has exactly two permitted sources, and no third:
+
+| Source | How it is trusted |
+| --- | --- |
+| A supplied product record | Used whole. The catalogue is authoritative and anything the model said about that product is ignored. |
+| The source text | The model must return the verbatim words that state the rating. Code checks the quotation appears in the source, **re-derives the rating from the quotation itself** (longest match over `RISK_RATING_SPELLINGS`), and refuses if that reading disagrees with what the model recorded. |
+
+If the text states no rating and no record is supplied, parsing fails. There is no middling default,
+which would be a guess wearing a neutral face.
+
+### It explains
+
+The model writes prose for a `Determination` or `Refusal` the engine has **already** produced, and
+declares which documented factors it relied on as structured `FactorCitation`s — plus, for a
+missing-factor refusal, which factors it relied on the profile *not* documenting. Code then checks
+every declaration against the profile, through the same function the engine's own
+`unsupported_rationale` rule uses, so the two cannot drift apart.
+
+One failed declaration refuses the whole rationale. Nothing is repaired: there is no path that drops
+the bad citation and keeps the sentence. **A patched rationale is one nobody reviewed.**
+
+### What verification catches, and what it does not
+
+Verification checks the declarations, plus one thing in the prose: every run of digits must be
+traceable to the material the rationale declared. A fabricated figure is caught even when every
+citation is correct.
+
+It does **not** read the prose for meaning. A rationale can declare three correct citations and
+still assert something undocumented in a sentence — a qualitative claim, a number written in words,
+or a true citation used to dress an unrelated assertion — and this code will return
+`VerifiedRationale`. So a verified rationale means *every client fact it declared is documented as
+declared, and every digit it wrote is traceable*. It does not mean the prose is true. Read it as a
+checked bibliography, not a checked argument. The full list of gaps is in the module docstring of
+`llm/verification.py`, written out rather than summarised, because the width of that gap is exactly
+what a reader of a verified rationale is entitled to know.
+
+### The over-refusal check
+
+A verifier that refuses everything is trivially safe and useless. `tests/test_rationale_over_refusal.py`
+holds a set of rationales that are correct, fully supported, and **must** pass — spanning both
+outcomes, because a refusal is the harder half to explain without softening it, and the half where
+an over-strict verifier does the most damage. It was written with the verifier, not after the first
+complaint about it. When a check is tightened and a case there fails, that is the signal the
+tightening cost more than it bought.
+
+---
+
 ## Quickstart
 
 Requires [uv](https://docs.astral.sh/uv/). Nothing else — uv fetches Python 3.12 itself.
@@ -156,12 +214,17 @@ Built so far:
   with validation at the boundary.
 - **The determination engine.** All seven rules, each its own pure function over the models, with
   the evaluation time injected: no clock reads, no environment reads, no model calls.
+- **Property-based tests** over the engine, and a mutation run with its survivors accounted for.
+- **The LLM layer and the rationale verifier**, described in the section above. Every test in it
+  runs against a stub client: no test needs a key or a network.
 - Toolchain, CI, and tests proving the toolchain works end to end.
 
 Not built yet:
 
-- **The LLM layer.** Nothing calls a model.
-- **Property-based tests** over the engine.
+- **The eval set.** Until it exists, the three configured constants
+  (`CONCENTRATION_LIMIT_FRACTION`, `PROFILE_REVIEW_INTERVAL_DAYS`, `RISK_RATING_SPELLINGS`) stay
+  labelled as repository choices rather than measured or sourced figures.
+- **The regulatory section** below, which the maintainer is verifying by hand.
 
 ---
 
@@ -169,12 +232,26 @@ Not built yet:
 
 ```
 src/suitability_receipts/
-  __init__.py       package exports
-  models.py         the four domain models and their supporting types
-  engine.py         the seven rules and the `determine` entry point
+  __init__.py         package exports; imports no SDK
+  models.py           the four domain models and their supporting types
+  engine.py           the seven rules and the `determine` entry point
+  llm/
+    __init__.py       the model layer's exports
+    client.py         the only module that reads ANTHROPIC_API_KEY, and the only
+                      one that imports the SDK; forced tool use, strict schemas
+    parsing.py        free text -> a validated Recommendation, or a refusal to parse
+    rationale.py      the drafting prompt, the tool schema, and `explain`
+    verification.py   the verifier: pure, client-free, and where "no" is decided
 tests/
-  test_models.py    model validation tests
-  test_engine.py    one section per rule, plus the entry point
+  synthetic.py                    synthetic fixtures and the stub client
+  test_models.py                  model validation tests
+  test_engine.py                  one section per rule, plus the entry point
+  test_engine_properties.py       Hypothesis properties over the engine
+  test_llm_client.py              credential handling and the shape of the call
+  test_llm_parsing.py             where a risk rating may come from, and refusals
+  test_llm_verification.py        the declarations that do not hold
+  test_rationale_over_refusal.py  the rationales that MUST pass
+  test_llm_boundary.py            the boundary, enforced by parsing the source tree
 ```
 
 ## Handling of secrets
@@ -183,8 +260,12 @@ tests/
 - Every client profile used as test data is synthetic and obviously so — names are placeholders in
   an obviously-fake form, and identifiers use the reserved `SYNTHETIC-` prefix. If a test fixture
   ever looks like it could be a real person, that is a bug.
-- **`ANTHROPIC_API_KEY` is read in exactly one place**, and that place does not exist yet. When the
-  LLM layer is added it will live at `src/suitability_receipts/llm/client.py`, which will be the
-  only module in the repository permitted to read the environment for credentials. Every other
+- **`ANTHROPIC_API_KEY` is read in exactly one place**: `src/suitability_receipts/llm/client.py`,
+  the only module in the repository permitted to read the environment for credentials. Every other
   module receives an already-constructed client by injection. Determination code never touches it —
   the rules do not call a model.
+- That is enforced, not documented and hoped for. `tests/test_llm_boundary.py` parses every module
+  under `src/` and fails if any file other than `client.py` imports `os` or `anthropic`, and if
+  `client.py` ever stops reading the environment. The key is passed to the SDK explicitly rather
+  than left to its own credential resolution, so there is exactly one way a credential enters the
+  process.
