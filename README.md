@@ -76,20 +76,28 @@ in tension with itself — a conservative risk tolerance against an aggressive s
 the engine takes the reading that does *not* produce a supported result. Those decisions are
 documented in the module docstring of `engine.py`, under "Tension between documented factors".
 
-### The two configured thresholds
+### The three configured constants
 
-Two rules need a number that the domain does not supply. Both numbers are decisions made in this
-repository, not figures from a citable source, and both are named constants at the top of
+Three rules need a number the domain does not supply. All three are decisions made in this
+repository, not figures from a citable source, and all three are named constants at the top of
 `src/suitability_receipts/engine.py` with their derivation written out:
 
 | Constant | Value | Status |
 | --- | --- | --- |
-| `CONCENTRATION_LIMIT_FRACTION` | 20% of the post-recommendation portfolio | Placeholder. Not an industry standard and not a regulatory figure. Chosen only so the rule has a definite boundary; to be calibrated against the eval set. |
-| `PROFILE_REVIEW_INTERVAL_DAYS` | 365 days | A repository choice encoding an annual cadence, in exact days so leap years do not shift it. No regulator is cited for it, here or in the code. |
+| `CONCENTRATION_LIMIT_FRACTION` | 20% of the post-recommendation portfolio | Boundary measured and kept; **level still a guess**. Not an industry standard and not a regulatory figure. |
+| `PROFILE_REVIEW_INTERVAL_DAYS` | 365 days | Boundary measured and kept — the interval is inclusive, so a profile reviewed exactly a year ago still determines. **Level still a guess.** |
+| `OBJECTIVE_RISK_CEILING` | a risk ceiling per stated objective | Mechanism measured: the mapping constrains on its own and each entry means the level it names. **Rows still a guess**, and because the ceiling is the minimum over every documented objective, one unsourced row reaches further than it looks. |
 
-Both are overridable per determination through `RuleConfig`, so neither is baked into a rule. Read a
-`concentration_breach` refusal as "exceeded the configured limit", never as "exceeded a required
-limit".
+"Boundary measured" and "level measured" are different claims, and only the first is made. The eval
+set pins each threshold to the cent and to the day — 20.000000% supported and 20.000007% refused,
+365 days supported and 366 refused — which establishes that the rules enforce their constants
+exactly where the docstrings say. It establishes nothing about whether 20% or 365 is the right
+number, because every case that turns on the level was constructed from the level. Measuring that
+needs a source of truth outside this repository, and there is none yet.
+
+The first two are overridable per determination through `RuleConfig`, so neither is baked into a
+rule. Read a `concentration_breach` refusal as "exceeded the configured limit", never as "exceeded a
+required limit".
 
 ---
 
@@ -148,6 +156,50 @@ outcomes, because a refusal is the harder half to explain without softening it, 
 an over-strict verifier does the most damage. It was written with the verifier, not after the first
 complaint about it. When a check is tightened and a case there fails, that is the signal the
 tightening cost more than it bought.
+
+---
+
+## The eval set
+
+```sh
+uv run python -m eval        # prints the report; exits non-zero when a category misses
+```
+
+35 cases in `eval/cases.py`, each a `ClientProfile`, a `Recommendation`, an expected outcome, and a
+short written reason for that expectation. **Every expectation was derived by reading the inputs
+against the documented rules, never by running the engine and recording what it said.** A case
+whose expectation came from the engine can only confirm that the engine agrees with itself.
+
+The set is scored by category, with the thresholds committed as constants in `eval/scorer.py`.
+There is no blended number anywhere in the report, because a blended number lets a soundness
+failure be paid for with easy passes. The report separates four outcomes that a
+supported-versus-refused comparison would collapse into two:
+
+| | |
+| --- | --- |
+| **passed** | the outcome and every refusal code are what the case says |
+| **wrong reason** | refused as expected, but not for the codes the case named — right at the top of the receipt, wrong in the part an advisor acts on |
+| **over-refusal** | refused something the set says is supported |
+| **under-refusal** | supported something the set says must refuse — printed **above** the table, because the README's claim is that a supported receipt means all seven rules ran and none refused, and one instance falsifies that claim |
+
+17 of the 35 cases must *not* refuse. That half is the one most case sets skip, and skipping it
+scores an engine that refuses everything at full marks.
+
+### What it currently reports
+
+33 of 35 agree with the engine: no under-refusals, no wrong-reason refusals, and every boundary and
+factor-tension case lands where the reading said it would. Two cases disagree, both over-refusals,
+and both come from the same root cause — **the risk and concentration rules do not look at the
+recommendation's action**:
+
+- A partial **sell of a holding rated above the documented tolerance** refuses for `risk_mismatch`,
+  though it leaves the client holding strictly less of the thing the tolerance cannot support.
+- A **sell that reduces an over-concentration without curing it** refuses for
+  `concentration_breach`, giving the same verdict to a trade that halves a breach and a trade that
+  creates one.
+
+Both are open. The cases were not adjusted to match the engine, and the engine was not adjusted to
+match the cases: the disagreement is the finding, and the `why` on each case argues its side.
 
 ---
 
@@ -217,13 +269,17 @@ Built so far:
 - **Property-based tests** over the engine, and a mutation run with its survivors accounted for.
 - **The LLM layer and the rationale verifier**, described in the section above. Every test in it
   runs against a stub client: no test needs a key or a network.
+- **The eval set and its scorer**, described in the section above, with two open disagreements
+  reported rather than resolved by editing the cases.
 - Toolchain, CI, and tests proving the toolchain works end to end.
 
 Not built yet:
 
-- **The eval set.** Until it exists, the three configured constants
-  (`CONCENTRATION_LIMIT_FRACTION`, `PROFILE_REVIEW_INTERVAL_DAYS`, `RISK_RATING_SPELLINGS`) stay
-  labelled as repository choices rather than measured or sourced figures.
+- **A calibration for the levels.** The eval set measures where each configured constant is
+  enforced, not whether it is set in the right place, so `CONCENTRATION_LIMIT_FRACTION`,
+  `PROFILE_REVIEW_INTERVAL_DAYS` and the rows of `OBJECTIVE_RISK_CEILING` stay labelled as
+  repository choices. `RISK_RATING_SPELLINGS` is untouched by the eval set entirely.
+- **A decision on the two open over-refusals** above.
 - **The regulatory section** below, which the maintainer is verifying by hand.
 
 ---
@@ -252,6 +308,11 @@ tests/
   test_llm_verification.py        the declarations that do not hold
   test_rationale_over_refusal.py  the rationales that MUST pass
   test_llm_boundary.py            the boundary, enforced by parsing the source tree
+  test_eval_set.py                guards the eval set's shape, not the engine's score
+eval/
+  cases.py            35 cases, each with the reading that produced its expectation
+  scorer.py           per-category thresholds, the four verdicts, and the report
+  __main__.py         `uv run python -m eval`
 ```
 
 ## Handling of secrets

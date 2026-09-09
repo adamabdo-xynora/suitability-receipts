@@ -32,7 +32,7 @@ packages = ["src/suitability_receipts"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["src", "tests"]
+src = ["src", "tests", "."]
 # mutmut's generated copy of the tree. It is machine-written and thrown away.
 extend-exclude = ["mutants"]
 
@@ -54,6 +54,8 @@ ignore = [
     "S101",     # asserts are the point of a test
     "PLR2004",  # literal comparisons are clearer than named constants in tests
 ]
+# The scorer's output medium is stdout: a report nobody can read is not a gate.
+"eval/scorer.py" = ["T201"]
 
 [tool.ruff.lint.flake8-type-checking]
 # pydantic evaluates annotations at runtime; moving these imports into a
@@ -73,7 +75,10 @@ docstring-code-format = true
 # no per-module escape hatches in this project. Fix the types instead.
 [tool.mypy]
 python_version = "3.12"
-files = ["src", "tests"]
+files = ["src", "tests", "eval"]
+# So that `mypy --strict src tests` still resolves `eval` when it follows the import
+# from tests/test_eval_set.py, rather than failing on a module it can see but not find.
+mypy_path = ["src", "tests", "."]
 plugins = ["pydantic.mypy"]
 strict = true
 warn_unreachable = true
@@ -99,7 +104,7 @@ xfail_strict = true
 # The package is imported from the source tree rather than through the installed
 # editable finder. mutmut runs the suite from a copy of the repository, and without
 # this every mutant would import the original, unmutated package and "survive".
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 markers = [
     "strategy_coverage: asserts the generated space reaches a boundary (see test_engine_properties.py)",
 ]

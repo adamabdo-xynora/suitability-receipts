@@ -139,10 +139,17 @@ from a citable requirement.
 The same limit is applied to all three dimensions (instrument, issuer, sector), which is
 itself a simplification — a defensible policy would very likely set them differently.
 
-TO DO: calibrate against the eval set once it exists, and either replace this with a
-figure traceable to a primary source or record the measured basis for keeping it. Until
-then, treat every `concentration_breach` refusal as "exceeded the configured limit",
-never as "exceeded a required limit"."""
+MEASURED, and only this far. The eval set (`eval/cases.py`) pins the boundary at
+19.999993% supported, 20.000000% supported, 20.000007% refused — so the limit is
+enforced exactly where this docstring says it is, and the maximum is itself permitted
+rather than being the first value refused. That is the semantics measured and kept.
+
+STILL A GUESS: the level. No case in the eval set is evidence that 20% is better than
+15% or 25%, because every case that turns on the level was constructed from the level.
+Measuring it needs a source of truth outside this repository — a stated policy, a
+regulator's figure, or outcome data — and there is none yet. Until there is, treat every
+`concentration_breach` refusal as "exceeded the configured limit", never as "exceeded a
+required limit"."""
 
 PROFILE_REVIEW_INTERVAL_DAYS = 365
 """Maximum age, in days, of a profile's documented review date before the profile is
@@ -158,8 +165,14 @@ project intends to model have not yet been verified against primary sources (see
 placeholder section in README.md), and a confident wrong citation in a compliance tool
 is worse than an absent one. This number is an engineering default.
 
-TO DO: replace with a sourced interval once the regulatory section is written, or record
-the measured basis for keeping it after the eval set exists."""
+MEASURED, and only this far. The eval set pins the boundary at 364 days supported, 365
+supported, 366 refused: the interval is the age a profile is allowed to reach and not
+the age at which it fails, so a profile reviewed exactly a year ago still determines.
+That inclusive reading is a decision, it is now tested, and it is kept.
+
+STILL A GUESS: the level. Nothing in the eval set distinguishes 365 from 300 or from
+400 — the cases that sit on the boundary were derived from the constant, so they move
+with it. Replacing it with a sourced interval remains work for the regulatory section."""
 
 OBJECTIVE_RISK_CEILING: MappingProxyType[InvestmentObjective, RiskLevel] = MappingProxyType(
     {
@@ -174,7 +187,21 @@ OBJECTIVE_RISK_CEILING: MappingProxyType[InvestmentObjective, RiskLevel] = Mappi
 
 Also a repository decision rather than a sourced mapping: it exists so that a stated
 objective constrains the determination instead of decorating it. It is used only to
-lower the effective ceiling, never to raise it above the documented risk tolerance."""
+lower the effective ceiling, never to raise it above the documented risk tolerance.
+
+MEASURED: the mapping is load-bearing and each entry means the level it names. The eval
+set holds a case at each side of the growth entry — a medium product supported, a
+medium-to-high product supported, a high product refused, all against a documented *high*
+tolerance, so the objective is doing the constraining on its own.
+
+STILL A GUESS, and with a consequence worth stating: no case is evidence that growth
+belongs at medium-to-high rather than at high, or income at low-to-medium. The rows are
+unsourced, and because the effective ceiling is the minimum over every documented
+objective, an unsourced row is not a local decision. A profile documenting both income
+and growth — an ordinary pair on a real KYC form — caps at low-to-medium, so a
+medium-rated product is refused for a client whose documented tolerance is medium. That
+is the mapping working as specified. Whether it is calibrated is a different question,
+and this set does not answer it."""
 
 REDEMPTION_DAYS_TO_LIQUIDITY: MappingProxyType[RedemptionFrequency, int | None] = MappingProxyType(
     {
