@@ -256,6 +256,21 @@ uv run mypy --strict src tests
 No API key is needed for any of the above, and none will ever be needed to run the determination
 rules. The rules are pure functions over documented data.
 
+The same suite runs inside a container, offline and with no credential in it:
+
+```sh
+docker build --target test -t suitability-receipts:test .
+docker run --rm suitability-receipts:test uv run pytest      # 334 tests, no key, no network
+docker build -t suitability-receipts .                       # the lean runtime image
+```
+
+Both stages install with `uv sync --locked`, so an image is built from the committed lockfile or not
+at all. The runtime image is worth being clear about: it holds the library, its two dependencies and
+nothing else — no pytest, no ruff, no `eval/`, and no way for `ANTHROPIC_API_KEY` to reach a layer,
+since there is no `ARG`, no `ENV` and no `.env` in the build context. There is no long-running
+process here to run in it, and the `Dockerfile` says so rather than inventing a `CMD`. The image
+worth having is the test one.
+
 ### Mutation testing
 
 `mutmut` over `src/` generates 573 mutants. The suite kills 542 and 31 survive — a score of 94.59%.

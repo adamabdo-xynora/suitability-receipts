@@ -1,0 +1,64 @@
+# What is listed here never enters the build context, and a file that is not in
+# the build context cannot end up in an image layer — not through the COPYs the
+# Dockerfile writes today, and not through one a later edit widens. That is the
+# guarantee, and it is why the exclusions live here rather than in each stage's
+# good intentions: a key that cannot enter the build context cannot end up in a
+# layer, and a layer that holds a key has published it to every registry the
+# image reaches.
+
+# Credentials and local configuration. ANTHROPIC_API_KEY is read in exactly one
+# module and arrives only through `docker run -e`; these two lines are the other
+# half of that discipline. Nothing in the build needs them, and an image that
+# accidentally contains one cannot be un-published.
+.env
+.env.*
+
+# The local environment. The image builds its own from uv.lock; a macOS .venv
+# copied into a Linux image would be the wrong platform, and it would also
+# shadow the one uv installs.
+.venv/
+
+# Bytecode and tool caches. Machine-written, host-specific, and stale the moment
+# they are copied. .hypothesis holds the example database from local property
+# runs — the test image regenerates it, and carrying it in would make a build's
+# results depend on which examples happened to be on the builder's disk.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+
+# mutmut's mutated copy of the source tree, plus its result database. It is a
+# whole second copy of src/ with deliberate bugs written into it, and ruff is
+# configured to skip it for the same reason nothing should ship it.
+mutants/
+.mutmut-cache
+
+# Build output and coverage. The image builds the wheel itself from src/.
+dist/
+build/
+*.egg-info/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+
+# History and editor leftovers, not build input. .git/ is also the largest thing
+# in the context by a wide margin.
+.git/
+.github/
+.gitignore
+.claude/
+.DS_Store
+
+# Not needed inside any stage.
+Dockerfile
+.dockerignore
+
+# README.md is deliberately NOT excluded, unlike the prose in the four
+# TypeScript repositories this file follows. pyproject.toml names it in the
+# `readme` field, so hatchling reads it when building the project's metadata:
+# without it in the context, `uv sync --locked` fails at the point where it
+# installs the project. It is an input here, not documentation.
