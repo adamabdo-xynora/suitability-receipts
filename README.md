@@ -271,6 +271,21 @@ since there is no `ARG`, no `ENV` and no `.env` in the build context. There is n
 process here to run in it, and the `Dockerfile` says so rather than inventing a `CMD`. The image
 worth having is the test one.
 
+### Container image
+
+The runtime image is published to GHCR on every version tag, by a workflow whose gate runs the 334
+tests, the 35 eval cases, `ruff check` and `mypy --strict` inside the test image first — the push
+step is unreachable unless all four pass.
+
+    docker pull ghcr.io/adamabdo-xynora/suitability-receipts:0.1.0
+    docker run --rm ghcr.io/adamabdo-xynora/suitability-receipts:0.1.0 \
+      python -c "from suitability_receipts import determine; print(determine)"
+
+That import is the whole of what this image is for, and it is published as a library layer rather
+than as something to start. It has no `CMD` and no `ENTRYPOINT`, for the reason given above: it
+cannot run the tests, it cannot run `eval/`, and with no credential it raises `MissingApiKeyError`.
+Published for `linux/amd64` and `linux/arm64`.
+
 ### Mutation testing
 
 `mutmut` over `src/` generates 573 mutants. The suite kills 542 and 31 survive — a score of 94.59%.
