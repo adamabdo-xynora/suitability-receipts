@@ -277,14 +277,22 @@ The runtime image is published to GHCR on every version tag, by a workflow whose
 tests, the 35 eval cases, `ruff check` and `mypy --strict` inside the test image first — the push
 step is unreachable unless all four pass.
 
-    docker pull ghcr.io/adamabdo-xynora/suitability-receipts:0.1.0
-    docker run --rm ghcr.io/adamabdo-xynora/suitability-receipts:0.1.0 \
+    docker pull ghcr.io/adamabdo-xynora/suitability-receipts:0.1.1
+    docker run --rm ghcr.io/adamabdo-xynora/suitability-receipts:0.1.1 \
       python -c "from suitability_receipts import determine; print(determine)"
 
 That import is the whole of what this image is for, and it is published as a library layer rather
 than as something to start. It has no `CMD` and no `ENTRYPOINT`, for the reason given above: it
 cannot run the tests, it cannot run `eval/`, and with no credential it raises `MissingApiKeyError`.
 Published for `linux/amd64` and `linux/arm64`.
+
+The image carries signed build provenance, so you can check that these bytes came from this
+repository's CI rather than from someone with push access to the registry:
+
+    gh attestation verify oci://ghcr.io/adamabdo-xynora/suitability-receipts:0.1.1 --owner adamabdo-xynora
+
+`0.1.0` remains published, `linux/amd64` only and without an attestation. Its digest has not
+changed and will not: a version that alters its bytes is not a version.
 
 ### Mutation testing
 
